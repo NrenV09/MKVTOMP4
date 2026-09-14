@@ -1,7 +1,12 @@
 import { useState, useRef, useEffect, ChangeEvent } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
-import { fetchFile, toBlobURL } from '@ffmpeg/util';
+import { fetchFile } from '@ffmpeg/util';
 import { FileVideo, UploadCloud, Loader2, Download, AlertCircle, ArrowRight, Settings2 } from 'lucide-react';
+
+// Use Vite's asset handling to bundle and get URLs for the required files
+import coreURL from '@ffmpeg/core?url';
+import wasmURL from '@ffmpeg/core/wasm?url';
+import workerURL from '@ffmpeg/ffmpeg/worker?worker&url';
 
 export default function App() {
   const [loaded, setLoaded] = useState(false);
@@ -24,26 +29,29 @@ export default function App() {
     setIsLoading(true);
     setError(null);
     try {
-      const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
+      console.log('Loading FFmpeg started...');
       const ffmpeg = ffmpegRef.current;
       
       ffmpeg.on('log', ({ message }) => {
-        console.log('FFmpeg:', message);
+        console.log('FFmpeg log:', message);
       });
       
       ffmpeg.on('progress', ({ progress }) => {
         setProgress(Math.round(progress * 100));
       });
       
+      console.log('Calling ffmpeg.load()...');
       await ffmpeg.load({
-        coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-        wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+        coreURL,
+        wasmURL,
+        classWorkerURL: workerURL,
       });
+      console.log('ffmpeg.load() finished.');
       
       setLoaded(true);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to load FFmpeg', err);
-      setError('Failed to load the media conversion engine. Please try again later.');
+      setError('Failed to load the media conversion engine: ' + (err?.message || err));
     } finally {
       setIsLoading(false);
     }
