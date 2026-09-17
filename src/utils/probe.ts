@@ -113,16 +113,28 @@ export async function probeMediaElement(file: File): Promise<Partial<SourceMetad
     if (isAudioOnly) {
       const audio = document.createElement('audio');
       audio.preload = 'metadata';
-      audio.onloadedmetadata = () => {
+      const cleanup = () => {
+        try {
+          audio.pause();
+          audio.removeAttribute('src');
+          audio.load();
+        } catch {
+          // ignore
+        }
         URL.revokeObjectURL(url);
+      };
+
+      audio.onloadedmetadata = () => {
+        const duration = audio.duration;
+        cleanup();
         resolve({
-          duration: audio.duration,
+          duration,
           hasAudio: true,
           hasVideo: false,
         });
       };
       audio.onerror = () => {
-        URL.revokeObjectURL(url);
+        cleanup();
         resolve({
           hasAudio: true,
           hasVideo: false,
@@ -132,19 +144,33 @@ export async function probeMediaElement(file: File): Promise<Partial<SourceMetad
     } else {
       const video = document.createElement('video');
       video.preload = 'metadata';
-      video.onloadedmetadata = () => {
+      const cleanup = () => {
+        try {
+          video.pause();
+          video.removeAttribute('src');
+          video.load();
+        } catch {
+          // ignore
+        }
         URL.revokeObjectURL(url);
+      };
+
+      video.onloadedmetadata = () => {
+        const duration = video.duration;
+        const width = video.videoWidth;
+        const height = video.videoHeight;
+        const hasVideo = video.videoWidth > 0;
+        cleanup();
         resolve({
-          duration: video.duration,
-          width: video.videoWidth,
-          height: video.videoHeight,
-          hasVideo: video.videoWidth > 0,
+          duration,
+          width,
+          height,
+          hasVideo,
           hasAudio: true, // usually video containers have audio unless silent
         });
       };
       video.onerror = () => {
-        // Container might not be decodable by browser HTML5 tag (e.g. MKV/AVI/FLV)
-        URL.revokeObjectURL(url);
+        cleanup();
         resolve({
           hasVideo: true,
           hasAudio: true,

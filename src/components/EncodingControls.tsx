@@ -65,54 +65,6 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
         framerate: 'source',
         fastStart: true,
       });
-    } else if (presetName === 'apple-native') {
-      const isHevc = source?.videoCodec?.toLowerCase().includes('hevc') || source?.videoCodec?.toLowerCase().includes('h265');
-      const isH264 = source?.videoCodec?.toLowerCase().includes('h264') || source?.videoCodec?.toLowerCase().includes('avc');
-      const isAudioAac = source?.audioCodec?.toLowerCase().includes('aac');
-
-      if (isHevc || isH264) {
-        updateConfig({
-          targetCategory: 'video',
-          container: 'mp4',
-          videoCodec: 'copy',
-          audioCodec: isAudioAac ? 'copy' : 'aac',
-          audioBitrate: '256k',
-          resolution: 'source',
-          framerate: 'source',
-          fastStart: true,
-          appleOptimized: true,
-        });
-      } else {
-        updateConfig({
-          targetCategory: 'video',
-          container: 'mp4',
-          videoCodec: 'libx264',
-          rateControl: 'crf',
-          crf: 22,
-          resolution: 'source',
-          framerate: 'source',
-          speedPreset: 'veryfast',
-          audioCodec: 'aac',
-          audioBitrate: '256k',
-          audioChannels: 'source',
-          fastStart: true,
-          appleOptimized: true,
-        });
-      }
-    } else if (presetName === '4k-pro') {
-      updateConfig({
-        targetCategory: 'video',
-        container: 'mp4',
-        videoCodec: 'libx264',
-        rateControl: 'crf',
-        crf: 21,
-        resolution: 'source',
-        framerate: 'source',
-        speedPreset: 'ultrafast', // ultrafast prevents CPU thermal throttling on iPad M-series during 4K encodes
-        audioCodec: 'aac',
-        audioBitrate: '256k',
-        fastStart: true,
-      });
     } else if (presetName === 'web-h264') {
       updateConfig({
         targetCategory: 'video',
@@ -136,22 +88,10 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
         rateControl: 'crf',
         crf: 18,
         resolution: 'source',
+        framerate: 'source',
         speedPreset: 'fast',
         audioCodec: 'aac',
         audioBitrate: '256k',
-        fastStart: true,
-      });
-    } else if (presetName === 'compact') {
-      updateConfig({
-        targetCategory: 'video',
-        container: 'mp4',
-        videoCodec: 'libx264',
-        rateControl: 'crf',
-        crf: 28,
-        resolution: '1280x720',
-        speedPreset: 'veryfast',
-        audioCodec: 'aac',
-        audioBitrate: '128k',
         fastStart: true,
       });
     } else if (presetName === 'hevc') {
@@ -160,11 +100,26 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
         container: 'mp4',
         videoCodec: 'libx265',
         rateControl: 'crf',
-        crf: 26,
+        crf: 24,
         resolution: 'source',
+        framerate: 'source',
         speedPreset: 'fast',
         audioCodec: 'aac',
         audioBitrate: '192k',
+        fastStart: true,
+      });
+    } else if (presetName === 'compact') {
+      updateConfig({
+        targetCategory: 'video',
+        container: 'mp4',
+        videoCodec: 'libx264',
+        rateControl: 'crf',
+        crf: 24,
+        resolution: '1280x720',
+        framerate: 'source',
+        speedPreset: 'veryfast',
+        audioCodec: 'aac',
+        audioBitrate: '128k',
         fastStart: true,
       });
     } else if (presetName === 'webm-vp9') {
@@ -284,8 +239,8 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                   <Film className="w-3.5 h-3.5 text-zinc-400" />
                 </div>
                 <div>
-                  <div className="text-xs font-medium text-zinc-200">Universal Video</div>
-                  <div className="text-[10px] text-zinc-500 mt-0.5">Compatible with all screens</div>
+                  <div className="text-xs font-medium text-zinc-200">Video (MP4)</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">H.264 / AAC</div>
                 </div>
               </button>
 
@@ -299,12 +254,12 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                 }`}
               >
                 <div className="flex items-center justify-between w-full mb-1">
-                  <span className="font-mono font-bold text-sm text-amber-400">⚡ Remux</span>
+                  <span className="font-mono font-bold text-sm text-amber-400">Remux</span>
                   <Zap className="w-3.5 h-3.5 text-amber-400" />
                 </div>
                 <div>
-                  <div className="text-xs font-medium text-zinc-200">Instant Copy</div>
-                  <div className="text-[10px] text-zinc-500 mt-0.5">Lossless, takes 2 seconds</div>
+                  <div className="text-xs font-medium text-zinc-200">Stream Copy</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">Lossless pass-through</div>
                 </div>
               </button>
 
@@ -322,8 +277,8 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                   <Music className="w-3.5 h-3.5 text-zinc-400" />
                 </div>
                 <div>
-                  <div className="text-xs font-medium text-zinc-200">Extract Audio</div>
-                  <div className="text-[10px] text-zinc-500 mt-0.5">High quality 320 kbps</div>
+                  <div className="text-xs font-medium text-zinc-200">Audio (MP3)</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">320 kbps CBR</div>
                 </div>
               </button>
 
@@ -341,8 +296,8 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                   <Film className="w-3.5 h-3.5 text-zinc-400" />
                 </div>
                 <div>
-                  <div className="text-xs font-medium text-zinc-200">Web Video</div>
-                  <div className="text-[10px] text-zinc-500 mt-0.5">VP9 + Opus audio</div>
+                  <div className="text-xs font-medium text-zinc-200">Video (WebM)</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">VP9 / Opus</div>
                 </div>
               </button>
 
@@ -360,8 +315,8 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                   <Volume2 className="w-3.5 h-3.5 text-zinc-400" />
                 </div>
                 <div>
-                  <div className="text-xs font-medium text-zinc-200">Lossless PCM</div>
-                  <div className="text-[10px] text-zinc-500 mt-0.5">Uncompressed audio</div>
+                  <div className="text-xs font-medium text-zinc-200">Audio (WAV)</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">PCM 16-bit</div>
                 </div>
               </button>
 
@@ -379,8 +334,8 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                   <Sparkles className="w-3.5 h-3.5 text-zinc-400" />
                 </div>
                 <div>
-                  <div className="text-xs font-medium text-zinc-200">Animated Clip</div>
-                  <div className="text-[10px] text-zinc-500 mt-0.5">For social & sharing</div>
+                  <div className="text-xs font-medium text-zinc-200">Animated GIF</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">Paletted 256 colors</div>
                 </div>
               </button>
             </div>
@@ -439,72 +394,74 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                 <button
                   onClick={() => applyPreset('remux')}
                   className={`p-3 rounded-lg border text-left transition-all min-h-[52px] ${
-                    config.videoCodec === 'copy' && !config.appleOptimized
+                    config.videoCodec === 'copy'
                       ? 'bg-emerald-500/10 border-emerald-500/60 ring-1 ring-emerald-500/30'
                       : 'bg-zinc-950/60 border-zinc-800/80 hover:border-zinc-700'
                   }`}
                 >
                   <div className="font-semibold text-zinc-200 flex items-center justify-between">
-                    <span>⚡ Stream Copy</span>
-                    {config.videoCodec === 'copy' && !config.appleOptimized && <Check className="w-3.5 h-3.5 text-emerald-400" />}
+                    <span>Stream Copy</span>
+                    {config.videoCodec === 'copy' && <Check className="w-3.5 h-3.5 text-emerald-400" />}
                   </div>
-                  <div className="text-[11px] text-zinc-400 mt-1">Instant (No re-encode)</div>
-                  <div className="text-[10px] text-zinc-500 mt-0.5">Exact original quality</div>
+                  <div className="text-[11px] text-zinc-400 mt-1">-c:v copy</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">No re-encoding</div>
                 </button>
 
-                {/* iPad / Apple Native */}
-                <button
-                  onClick={() => applyPreset('apple-native')}
-                  className={`p-3 rounded-lg border text-left transition-all min-h-[52px] ${
-                    config.appleOptimized
-                      ? 'bg-emerald-500/10 border-emerald-500/60 ring-1 ring-emerald-500/30'
-                      : 'bg-zinc-950/60 border-zinc-800/80 hover:border-zinc-700'
-                  }`}
-                >
-                  <div className="font-semibold text-zinc-200 flex items-center justify-between">
-                    <span> iPad Native</span>
-                    {config.appleOptimized && <Check className="w-3.5 h-3.5 text-emerald-400" />}
-                  </div>
-                  <div className="text-[11px] text-zinc-400 mt-1">QuickTime & Photos</div>
-                  <div className="text-[10px] text-zinc-500 mt-0.5">Faststart + hvc1 Tag</div>
-                </button>
-
-                {/* Standard Balanced */}
+                {/* H.264 Balanced */}
                 <button
                   onClick={() => applyPreset('web-h264')}
                   className={`p-3 rounded-lg border text-left transition-all min-h-[52px] ${
-                    config.videoCodec === 'libx264' && config.crf === 23 && !config.appleOptimized
+                    config.videoCodec === 'libx264' && config.crf === 23
                       ? 'bg-emerald-500/10 border-emerald-500/60 ring-1 ring-emerald-500/30'
                       : 'bg-zinc-950/60 border-zinc-800/80 hover:border-zinc-700'
                   }`}
                 >
                   <div className="font-semibold text-zinc-200 flex items-center justify-between">
-                    <span>Balanced (Default)</span>
-                    {config.videoCodec === 'libx264' && config.crf === 23 && !config.appleOptimized && (
+                    <span>H.264 (Default)</span>
+                    {config.videoCodec === 'libx264' && config.crf === 23 && (
                       <Check className="w-3.5 h-3.5 text-emerald-400" />
                     )}
                   </div>
-                  <div className="text-[11px] text-zinc-400 mt-1">H.264 • Crisp Quality</div>
-                  <div className="text-[10px] text-zinc-500 mt-0.5">Keeps original resolution</div>
+                  <div className="text-[11px] text-zinc-400 mt-1">CRF 23 • veryfast</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">Universal playback</div>
                 </button>
 
-                {/* 4K UHD Pro Performance */}
+                {/* High Quality */}
                 <button
-                  onClick={() => applyPreset('4k-pro')}
+                  onClick={() => applyPreset('high-quality')}
                   className={`p-3 rounded-lg border text-left transition-all min-h-[52px] ${
-                    config.speedPreset === 'ultrafast' && config.crf === 21
+                    config.videoCodec === 'libx264' && config.crf === 18
+                      ? 'bg-emerald-500/10 border-emerald-500/60 ring-1 ring-emerald-500/30'
+                      : 'bg-zinc-950/60 border-zinc-800/80 hover:border-zinc-700'
+                  }`}
+                >
+                  <div className="font-semibold text-zinc-200 flex items-center justify-between">
+                    <span>High Quality</span>
+                    {config.videoCodec === 'libx264' && config.crf === 18 && (
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    )}
+                  </div>
+                  <div className="text-[11px] text-zinc-400 mt-1">CRF 18 • fast</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">Visually lossless</div>
+                </button>
+
+                {/* HEVC / H.265 */}
+                <button
+                  onClick={() => applyPreset('hevc')}
+                  className={`p-3 rounded-lg border text-left transition-all min-h-[52px] ${
+                    config.videoCodec === 'libx265'
                       ? 'bg-purple-500/10 border-purple-500/60 ring-1 ring-purple-500/30'
                       : 'bg-zinc-950/60 border-zinc-800/80 hover:border-zinc-700'
                   }`}
                 >
                   <div className="font-semibold text-zinc-200 flex items-center justify-between">
-                    <span className="text-purple-300">4K / M-Series Pro</span>
-                    {config.speedPreset === 'ultrafast' && config.crf === 21 && (
+                    <span>HEVC / H.265</span>
+                    {config.videoCodec === 'libx265' && (
                       <Check className="w-3.5 h-3.5 text-purple-400" />
                     )}
                   </div>
-                  <div className="text-[11px] text-zinc-400 mt-1">CRF 21 • Multi-Core</div>
-                  <div className="text-[10px] text-zinc-500 mt-0.5">Low thermal strain</div>
+                  <div className="text-[11px] text-zinc-400 mt-1">CRF 24 • libx265</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">High efficiency</div>
                 </button>
 
                 {/* Compact 720p */}
@@ -517,13 +474,13 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                   }`}
                 >
                   <div className="font-semibold text-zinc-200 flex items-center justify-between">
-                    <span>Compact (720p)</span>
+                    <span>720p Downscale</span>
                     {config.resolution === '1280x720' && (
                       <Check className="w-3.5 h-3.5 text-emerald-400" />
                     )}
                   </div>
-                  <div className="text-[11px] text-zinc-400 mt-1">Smaller File Size</div>
-                  <div className="text-[10px] text-zinc-500 mt-0.5">Faster export for sharing</div>
+                  <div className="text-[11px] text-zinc-400 mt-1">1280×720 • CRF 24</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">Reduced bitrate</div>
                 </button>
               </div>
             </div>

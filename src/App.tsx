@@ -83,6 +83,7 @@ export default function App() {
   });
 
   const [result, setResult] = useState<ConversionResult | null>(null);
+  const [isPurged, setIsPurged] = useState(false);
 
   const [logs, setLogs] = useState<LogMessage[]>([]);
   const [terminalOpen, setTerminalOpen] = useState(false);
@@ -92,6 +93,7 @@ export default function App() {
   const startTimeRef = useRef<number>(0);
   const probeLogsBuffer = useRef<string[]>([]);
   const activeVirtualFiles = useRef<{ inName?: string; outName?: string }>({});
+  const activeOutputUrlRef = useRef<string | null>(null);
   const wakeLockSentinelRef = useRef<any>(null);
 
   const addLog = useCallback((type: 'stdout' | 'stderr' | 'system' | 'error', text: string) => {
@@ -106,6 +108,55 @@ export default function App() {
       },
     ]);
   }, []);
+
+  // Safely revoke object URLs to prevent browser/WebKit disk cache & System Data growth
+  const revokeActiveUrl = useCallback(() => {
+    if (activeOutputUrlRef.current) {
+      try {
+        URL.revokeObjectURL(activeOutputUrlRef.current);
+      } catch {}
+      activeOutputUrlRef.current = null;
+    }
+  }, []);
+
+  const purgeAllCaches = useCallback(async () => {
+    // 1. Revoke active object URL
+    revokeActiveUrl();
+
+    // 2. Unload hardware decoders on any active video/audio elements in DOM
+    if (typeof document !== 'undefined') {
+      document.querySelectorAll('video, audio').forEach((el) => {
+        try {
+          (el as HTMLMediaElement).pause();
+          el.removeAttribute('src');
+          (el as HTMLMediaElement).load();
+        } catch {}
+      });
+    }
+
+    // 3. Unlink any lingering files in MEMFS
+    if (ffmpegRef.current) {
+      try {
+        const active = activeVirtualFiles.current;
+        if (active.inName) await ffmpegRef.current.deleteFile(active.inName).catch(() => {});
+        if (active.outName) await ffmpegRef.current.deleteFile(active.outName).catch(() => {});
+        activeVirtualFiles.current = {};
+      } catch {}
+    }
+
+    // 4. Purge browser CacheStorage if present
+    if (typeof window !== 'undefined' && 'caches' in window) {
+      try {
+        const keys = await window.caches.keys();
+        for (const key of keys) {
+          await window.caches.delete(key);
+        }
+      } catch {}
+    }
+
+    setIsPurged(true);
+    addLog('system', 'Purged media cache and released memory buffers.');
+  }, [addLog, revokeActiveUrl]);
 
   // Initialize FFmpeg WebAssembly core
   const initEngine = async () => {
@@ -200,10 +251,15 @@ export default function App() {
 
   useEffect(() => {
     initEngine();
-  }, []);
+    return () => {
+      revokeActiveUrl();
+    };
+  }, [revokeActiveUrl]);
 
   // Inspect source media file
   const handleFileSelected = async (file: File) => {
+    revokeActiveUrl();
+    setIsPurged(false);
     setRawFile(file);
     setResult(null);
     setConversionError(null);
@@ -298,6 +354,8 @@ export default function App() {
   };
 
   const handleClearFile = () => {
+    revokeActiveUrl();
+    setIsPurged(false);
     setRawFile(null);
     setSourceMeta(null);
     setResult(null);
@@ -324,19 +382,20 @@ export default function App() {
       return;
     }
 
+    revokeActiveUrl();
+    setIsPurged(false);
     setIsConverting(true);
     setConversionError(null);
     setResult(null);
 
-    // Acquire Screen Wake Lock on iPad/Mobile devices so background tabs or screens don't sleep
+    // Acquire Screen Wake Lock so display/thread does not sleep during active encode
     if (typeof navigator !== 'undefined' && 'wakeLock' in navigator) {
       try {
         const lock = await (navigator as any).wakeLock.request('screen');
         wakeLockSentinelRef.current = lock;
         setWakeLockActive(true);
-        addLog('system', 'Acquired Screen Wake Lock (prevents iPad screen sleeping during media conversion).');
+        addLog('system', 'Acquired Screen Wake Lock.');
       } catch (wakeErr) {
-        // Wake lock can fail if battery saver is on or user switched tabs; non-fatal
         console.warn('Wake Lock request skipped:', wakeErr);
       }
     }
@@ -382,11 +441,10 @@ export default function App() {
         );
       }
 
-      // 4. MEMORY PEAK OPTIMIZATION FOR M-SERIES IPAD:
-      // Unlink input file immediately to cut active MEMFS memory footprint in half before loading output!
+      // Unlink input file immediately to free virtual memory before loading output
       try {
         await ffmpeg.deleteFile(virtualIn);
-        addLog('system', `MEMFS garbage collection: Unlinked input buffer ${virtualIn} early to free RAM.`);
+        addLog('system', `Unlinked virtual input buffer ${virtualIn}.`);
       } catch {
         // ignore
       }
@@ -397,6 +455,8 @@ export default function App() {
       const mimeType = getMimeType(config.container);
       const blob = new Blob([(outputData as Uint8Array).buffer], { type: mimeType });
       const outputUrl = URL.createObjectURL(blob);
+      activeOutputUrlRef.current = outputUrl;
+      setIsPurged(false);
 
       const baseName = sourceMeta.name.replace(/\.[^/.]+$/, '');
       const finalOutputName = `${baseName}_converted${extOut}`;
@@ -486,6 +546,7 @@ export default function App() {
         toggleTerminal={() => setTerminalOpen(!terminalOpen)}
         logCount={logs.length}
         wakeLockActive={wakeLockActive}
+        onPurgeCache={purgeAllCaches}
       />
 
       {/* Main Workstation Canvas */}
@@ -551,7 +612,13 @@ export default function App() {
                 result={result}
                 source={sourceMeta}
                 onReset={handleClearFile}
-                onAdjustSettings={() => setResult(null)}
+                onAdjustSettings={() => {
+                  revokeActiveUrl();
+                  setIsPurged(false);
+                  setResult(null);
+                }}
+                onPurgeCache={purgeAllCaches}
+                isPurged={isPurged}
               />
             ) : isConverting ? (
               /* 3. ACTIVE CONVERSION PROGRESS ENGINE */

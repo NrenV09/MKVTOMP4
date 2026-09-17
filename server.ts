@@ -6,10 +6,11 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  // Add headers for SharedArrayBuffer support in ffmpeg.wasm
+  // Add headers for SharedArrayBuffer support in ffmpeg.wasm and prevent disk cache bloat
   app.use((req, res, next) => {
     res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
     res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
+    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     next();
   });
 
