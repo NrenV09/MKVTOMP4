@@ -63,6 +63,55 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
         audioCodec: 'copy',
         resolution: 'source',
         framerate: 'source',
+        fastStart: true,
+      });
+    } else if (presetName === 'apple-native') {
+      const isHevc = source?.videoCodec?.toLowerCase().includes('hevc') || source?.videoCodec?.toLowerCase().includes('h265');
+      const isH264 = source?.videoCodec?.toLowerCase().includes('h264') || source?.videoCodec?.toLowerCase().includes('avc');
+      const isAudioAac = source?.audioCodec?.toLowerCase().includes('aac');
+
+      if (isHevc || isH264) {
+        updateConfig({
+          targetCategory: 'video',
+          container: 'mp4',
+          videoCodec: 'copy',
+          audioCodec: isAudioAac ? 'copy' : 'aac',
+          audioBitrate: '256k',
+          resolution: 'source',
+          framerate: 'source',
+          fastStart: true,
+          appleOptimized: true,
+        });
+      } else {
+        updateConfig({
+          targetCategory: 'video',
+          container: 'mp4',
+          videoCodec: 'libx264',
+          rateControl: 'crf',
+          crf: 22,
+          resolution: 'source',
+          framerate: 'source',
+          speedPreset: 'veryfast',
+          audioCodec: 'aac',
+          audioBitrate: '256k',
+          audioChannels: 'source',
+          fastStart: true,
+          appleOptimized: true,
+        });
+      }
+    } else if (presetName === '4k-pro') {
+      updateConfig({
+        targetCategory: 'video',
+        container: 'mp4',
+        videoCodec: 'libx264',
+        rateControl: 'crf',
+        crf: 21,
+        resolution: 'source',
+        framerate: 'source',
+        speedPreset: 'ultrafast', // ultrafast prevents CPU thermal throttling on iPad M-series during 4K encodes
+        audioCodec: 'aac',
+        audioBitrate: '256k',
+        fastStart: true,
       });
     } else if (presetName === 'web-h264') {
       updateConfig({
@@ -77,6 +126,7 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
         audioCodec: 'aac',
         audioBitrate: '192k',
         audioChannels: 'source',
+        fastStart: true,
       });
     } else if (presetName === 'high-quality') {
       updateConfig({
@@ -89,6 +139,7 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
         speedPreset: 'fast',
         audioCodec: 'aac',
         audioBitrate: '256k',
+        fastStart: true,
       });
     } else if (presetName === 'compact') {
       updateConfig({
@@ -101,6 +152,7 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
         speedPreset: 'veryfast',
         audioCodec: 'aac',
         audioBitrate: '128k',
+        fastStart: true,
       });
     } else if (presetName === 'hevc') {
       updateConfig({
@@ -113,6 +165,7 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
         speedPreset: 'fast',
         audioCodec: 'aac',
         audioBitrate: '192k',
+        fastStart: true,
       });
     } else if (presetName === 'webm-vp9') {
       updateConfig({
@@ -381,36 +434,53 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                 2. Quality & Speed Profile
               </label>
 
-              <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 font-mono text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-5 gap-2 font-mono text-xs">
                 {/* Remux */}
                 <button
                   onClick={() => applyPreset('remux')}
-                  className={`p-3 rounded-lg border text-left transition-all ${
-                    config.videoCodec === 'copy'
+                  className={`p-3 rounded-lg border text-left transition-all min-h-[52px] ${
+                    config.videoCodec === 'copy' && !config.appleOptimized
                       ? 'bg-emerald-500/10 border-emerald-500/60 ring-1 ring-emerald-500/30'
                       : 'bg-zinc-950/60 border-zinc-800/80 hover:border-zinc-700'
                   }`}
                 >
                   <div className="font-semibold text-zinc-200 flex items-center justify-between">
                     <span>⚡ Stream Copy</span>
-                    {config.videoCodec === 'copy' && <Check className="w-3.5 h-3.5 text-emerald-400" />}
+                    {config.videoCodec === 'copy' && !config.appleOptimized && <Check className="w-3.5 h-3.5 text-emerald-400" />}
                   </div>
                   <div className="text-[11px] text-zinc-400 mt-1">Instant (No re-encode)</div>
                   <div className="text-[10px] text-zinc-500 mt-0.5">Exact original quality</div>
                 </button>
 
+                {/* iPad / Apple Native */}
+                <button
+                  onClick={() => applyPreset('apple-native')}
+                  className={`p-3 rounded-lg border text-left transition-all min-h-[52px] ${
+                    config.appleOptimized
+                      ? 'bg-emerald-500/10 border-emerald-500/60 ring-1 ring-emerald-500/30'
+                      : 'bg-zinc-950/60 border-zinc-800/80 hover:border-zinc-700'
+                  }`}
+                >
+                  <div className="font-semibold text-zinc-200 flex items-center justify-between">
+                    <span> iPad Native</span>
+                    {config.appleOptimized && <Check className="w-3.5 h-3.5 text-emerald-400" />}
+                  </div>
+                  <div className="text-[11px] text-zinc-400 mt-1">QuickTime & Photos</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">Faststart + hvc1 Tag</div>
+                </button>
+
                 {/* Standard Balanced */}
                 <button
                   onClick={() => applyPreset('web-h264')}
-                  className={`p-3 rounded-lg border text-left transition-all ${
-                    config.videoCodec === 'libx264' && config.crf === 23 && config.resolution === 'source'
+                  className={`p-3 rounded-lg border text-left transition-all min-h-[52px] ${
+                    config.videoCodec === 'libx264' && config.crf === 23 && !config.appleOptimized
                       ? 'bg-emerald-500/10 border-emerald-500/60 ring-1 ring-emerald-500/30'
                       : 'bg-zinc-950/60 border-zinc-800/80 hover:border-zinc-700'
                   }`}
                 >
                   <div className="font-semibold text-zinc-200 flex items-center justify-between">
                     <span>Balanced (Default)</span>
-                    {config.videoCodec === 'libx264' && config.crf === 23 && config.resolution === 'source' && (
+                    {config.videoCodec === 'libx264' && config.crf === 23 && !config.appleOptimized && (
                       <Check className="w-3.5 h-3.5 text-emerald-400" />
                     )}
                   </div>
@@ -418,29 +488,29 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                   <div className="text-[10px] text-zinc-500 mt-0.5">Keeps original resolution</div>
                 </button>
 
-                {/* High Quality */}
+                {/* 4K UHD Pro Performance */}
                 <button
-                  onClick={() => applyPreset('high-quality')}
-                  className={`p-3 rounded-lg border text-left transition-all ${
-                    config.videoCodec === 'libx264' && config.crf === 18
-                      ? 'bg-emerald-500/10 border-emerald-500/60 ring-1 ring-emerald-500/30'
+                  onClick={() => applyPreset('4k-pro')}
+                  className={`p-3 rounded-lg border text-left transition-all min-h-[52px] ${
+                    config.speedPreset === 'ultrafast' && config.crf === 21
+                      ? 'bg-purple-500/10 border-purple-500/60 ring-1 ring-purple-500/30'
                       : 'bg-zinc-950/60 border-zinc-800/80 hover:border-zinc-700'
                   }`}
                 >
                   <div className="font-semibold text-zinc-200 flex items-center justify-between">
-                    <span>High Fidelity</span>
-                    {config.videoCodec === 'libx264' && config.crf === 18 && (
-                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    <span className="text-purple-300">4K / M-Series Pro</span>
+                    {config.speedPreset === 'ultrafast' && config.crf === 21 && (
+                      <Check className="w-3.5 h-3.5 text-purple-400" />
                     )}
                   </div>
-                  <div className="text-[11px] text-zinc-400 mt-1">CRF 18 • Near Lossless</div>
-                  <div className="text-[10px] text-zinc-500 mt-0.5">Best visual fidelity</div>
+                  <div className="text-[11px] text-zinc-400 mt-1">CRF 21 • Multi-Core</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">Low thermal strain</div>
                 </button>
 
                 {/* Compact 720p */}
                 <button
                   onClick={() => applyPreset('compact')}
-                  className={`p-3 rounded-lg border text-left transition-all ${
+                  className={`p-3 rounded-lg border text-left transition-all min-h-[52px] ${
                     config.resolution === '1280x720'
                       ? 'bg-emerald-500/10 border-emerald-500/60 ring-1 ring-emerald-500/30'
                       : 'bg-zinc-950/60 border-zinc-800/80 hover:border-zinc-700'

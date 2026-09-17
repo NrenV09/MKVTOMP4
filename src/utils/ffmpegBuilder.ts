@@ -133,13 +133,39 @@ export function checkCompatibility(
   return { isCompatible: true };
 }
 
+export function detectDeviceCapabilities() {
+  if (typeof navigator === 'undefined') {
+    return { isIPad: false, isApple: false, cores: 4, isMSeries: false };
+  }
+  const ua = navigator.userAgent || '';
+  const isIPad = /iPad/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isApple = /Mac|iPad|iPhone/.test(ua) || isIPad;
+  const cores = navigator.hardwareConcurrency || 4;
+  // M-series iPads (M1, M2, M4 iPad Pro/Air) and Macs typically expose 8 or more concurrency threads
+  const isMSeries = isApple && cores >= 8;
+
+  return {
+    isIPad,
+    isApple,
+    cores,
+    isMSeries,
+    hasWakeLock: 'wakeLock' in navigator,
+  };
+}
+
 export function buildFFmpegArgs(
   inputFilename: string,
   outputFilename: string,
   config: EncodingConfig,
   source?: SourceMetadata | null
 ): string[] {
-  const args: string[] = ['-i', inputFilename];
+  const args: string[] = [];
+
+  // Multi-threading optimization: -threads 0 lets FFmpeg use all available WebAssembly worker threads
+  args.push('-threads', '0');
+
+  // Input file
+  args.push('-i', inputFilename);
 
   // AUDIO ONLY EXTRACTION
   if (config.targetCategory === 'audio') {
@@ -185,8 +211,22 @@ export function buildFFmpegArgs(
 
   // VIDEO CONVERSION
   // 1. Video Codec
+  const isAppleTarget = config.container === 'mp4' || config.container === 'mov';
+
   if (config.videoCodec === 'copy') {
     args.push('-c:v', 'copy');
+
+    // Apple HEVC Stream Copy tag: Apple QuickTime and iPadOS require the 'hvc1' fourcc tag
+    // to play HEVC streams inside an MP4 container. Without this, iOS/iPadOS will fail to play it.
+    const isSourceHevc = source?.videoCodec?.toLowerCase().includes('hevc') || source?.videoCodec?.toLowerCase().includes('h265');
+    if (isAppleTarget && isSourceHevc) {
+      args.push('-tag:v', 'hvc1');
+    }
+
+    // Faststart: Move moov atom to beginning of file for instant scrubbing and playback on iPad
+    if (isAppleTarget) {
+      args.push('-movflags', '+faststart');
+    }
   } else {
     args.push('-c:v', config.videoCodec);
 
@@ -206,7 +246,7 @@ export function buildFFmpegArgs(
     const filters: string[] = [];
     if (config.resolution !== 'source') {
       const [w, h] = config.resolution.split('x');
-      // Ensure dimensions are divisible by 2 for H.264
+      // Ensure dimensions are divisible by 2 for H.264/H.265
       filters.push(`scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2`);
     } else {
       // Ensure even width/height
@@ -221,13 +261,24 @@ export function buildFFmpegArgs(
       args.push('-vf', filters.join(','));
     }
 
-    // Pixel format for universal compatibility with H.264 in browsers
+    // Pixel format: Ensure 8-bit YUV420p for universal Apple Silicon / iPad hardware decoding
+    // This is critical when input is 10-bit HDR (yuv420p10le) to prevent black screens or corrupted color matrices.
     if (['libx264', 'libx265'].includes(config.videoCodec)) {
       args.push('-pix_fmt', 'yuv420p');
     }
 
-    // Faststart for streaming MP4
-    if (config.container === 'mp4' || config.container === 'mov') {
+    // Profile & Level for H.264 Apple Silicon hardware compatibility
+    if (config.videoCodec === 'libx264' && isAppleTarget) {
+      args.push('-profile:v', 'high', '-level', '4.2');
+    }
+
+    // Apple HEVC Tag for QuickTime / iPadOS Photos / Safari native playback
+    if (config.videoCodec === 'libx265' && isAppleTarget) {
+      args.push('-tag:v', 'hvc1');
+    }
+
+    // Faststart for streaming MP4 on iPadOS Safari & Files app
+    if (isAppleTarget) {
       args.push('-movflags', '+faststart');
     }
   }

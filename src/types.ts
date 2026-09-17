@@ -62,6 +62,10 @@ export interface SourceMetadata {
   audioSampleRate?: number;
   audioChannels?: number;
   bitrate?: number;
+  pixelFormat?: string;
+  is10Bit?: boolean;
+  is4K?: boolean;
+  isHighBitrate?: boolean;
   parsedStreams?: string[];
 }
 
@@ -81,6 +85,11 @@ export interface EncodingConfig {
   audioBitrate: AudioBitrate;
   audioChannels: ChannelLayout;
   audioSampleRate: 'source' | '48000' | '44100';
+  // Hardware & Apple Silicon Optimization
+  appleOptimized?: boolean;
+  fastStart?: boolean;
+  pixelFormat?: 'yuv420p' | 'yuv420p10le' | 'auto';
+  hardwareThreads?: number;
 }
 
 export interface ProgressTelemetry {

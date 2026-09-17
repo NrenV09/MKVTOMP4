@@ -86,11 +86,13 @@ export default function App() {
 
   const [logs, setLogs] = useState<LogMessage[]>([]);
   const [terminalOpen, setTerminalOpen] = useState(false);
+  const [wakeLockActive, setWakeLockActive] = useState(false);
 
   const ffmpegRef = useRef<FFmpeg | null>(null);
   const startTimeRef = useRef<number>(0);
   const probeLogsBuffer = useRef<string[]>([]);
   const activeVirtualFiles = useRef<{ inName?: string; outName?: string }>({});
+  const wakeLockSentinelRef = useRef<any>(null);
 
   const addLog = useCallback((type: 'stdout' | 'stderr' | 'system' | 'error', text: string) => {
     const time = new Date().toTimeString().split(' ')[0] + '.' + String(new Date().getMilliseconds()).padStart(3, '0');
@@ -326,6 +328,19 @@ export default function App() {
     setConversionError(null);
     setResult(null);
 
+    // Acquire Screen Wake Lock on iPad/Mobile devices so background tabs or screens don't sleep
+    if (typeof navigator !== 'undefined' && 'wakeLock' in navigator) {
+      try {
+        const lock = await (navigator as any).wakeLock.request('screen');
+        wakeLockSentinelRef.current = lock;
+        setWakeLockActive(true);
+        addLog('system', 'Acquired Screen Wake Lock (prevents iPad screen sleeping during media conversion).');
+      } catch (wakeErr) {
+        // Wake lock can fail if battery saver is on or user switched tabs; non-fatal
+        console.warn('Wake Lock request skipped:', wakeErr);
+      }
+    }
+
     startTimeRef.current = Date.now();
     setTelemetry({
       percent: 0,
@@ -367,7 +382,16 @@ export default function App() {
         );
       }
 
-      // 4. Read generated output from virtual filesystem
+      // 4. MEMORY PEAK OPTIMIZATION FOR M-SERIES IPAD:
+      // Unlink input file immediately to cut active MEMFS memory footprint in half before loading output!
+      try {
+        await ffmpeg.deleteFile(virtualIn);
+        addLog('system', `MEMFS garbage collection: Unlinked input buffer ${virtualIn} early to free RAM.`);
+      } catch {
+        // ignore
+      }
+
+      // 5. Read generated output from virtual filesystem
       addLog('system', `Reading output file ${virtualOut} from MEMFS...`);
       const outputData = await ffmpeg.readFile(virtualOut);
       const mimeType = getMimeType(config.container);
@@ -391,11 +415,10 @@ export default function App() {
 
       addLog('system', `Conversion finished successfully in ${(elapsed / 1000).toFixed(1)}s.`);
 
-      // 5. CRITICAL: Unlink and cleanup files from MEMFS to prevent memory leaks
+      // 6. Cleanup output file from MEMFS
       try {
-        await ffmpeg.deleteFile(virtualIn);
         await ffmpeg.deleteFile(virtualOut);
-        addLog('system', `MEMFS garbage collection: Unlinked ${virtualIn} and ${virtualOut}.`);
+        addLog('system', `MEMFS garbage collection: Unlinked ${virtualOut}.`);
       } catch (cleanupErr) {
         console.warn('Cleanup non-fatal warning:', cleanupErr);
       }
@@ -405,6 +428,16 @@ export default function App() {
       setConversionError(errorMsg);
       addLog('error', `Execution failed: ${errorMsg}`);
     } finally {
+      // Release Screen Wake Lock
+      if (wakeLockSentinelRef.current) {
+        try {
+          await wakeLockSentinelRef.current.release();
+        } catch {
+          // ignore
+        }
+        wakeLockSentinelRef.current = null;
+        setWakeLockActive(false);
+      }
       setIsConverting(false);
     }
   };
@@ -412,6 +445,15 @@ export default function App() {
   // Abort ongoing job
   const handleAbort = async () => {
     addLog('error', 'User aborted conversion process. Terminating WebAssembly worker...');
+    if (wakeLockSentinelRef.current) {
+      try {
+        await wakeLockSentinelRef.current.release();
+      } catch {
+        // ignore
+      }
+      wakeLockSentinelRef.current = null;
+      setWakeLockActive(false);
+    }
     if (ffmpegRef.current) {
       try {
         ffmpegRef.current.terminate();
@@ -443,6 +485,7 @@ export default function App() {
         terminalOpen={terminalOpen}
         toggleTerminal={() => setTerminalOpen(!terminalOpen)}
         logCount={logs.length}
+        wakeLockActive={wakeLockActive}
       />
 
       {/* Main Workstation Canvas */}

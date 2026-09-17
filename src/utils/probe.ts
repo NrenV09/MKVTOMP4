@@ -53,6 +53,24 @@ export function parseFFmpegProbeLogs(logs: string[]): Partial<SourceMetadata> {
           if (fpsMatch) {
             meta.fps = Math.round(parseFloat(fpsMatch[1]));
           }
+          // Pixel Format (e.g. yuv420p, yuv420p10le, yuv444p)
+          const pixMatch = part.match(/(yuv[\w]+)/i);
+          if (pixMatch) {
+            meta.pixelFormat = pixMatch[1].toLowerCase();
+          }
+        }
+
+        // 10-bit / HDR Detection
+        const is10 = line.includes('10le') || line.includes('Main 10') || line.includes('High 10') || (meta.pixelFormat && meta.pixelFormat.includes('10'));
+        meta.is10Bit = Boolean(is10);
+
+        // 4K UHD Detection
+        const is4k = (meta.width && meta.width >= 3840) || (meta.height && meta.height >= 2160);
+        meta.is4K = Boolean(is4k);
+
+        // High Bitrate Detection (>15000 kbps)
+        if (meta.bitrate && meta.bitrate >= 15000) {
+          meta.isHighBitrate = true;
         }
       }
     }
