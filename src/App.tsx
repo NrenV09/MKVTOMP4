@@ -527,23 +527,42 @@ export default function App() {
                   disabled={isConverting}
                 />
 
-                <CommandPreview commandArgs={currentCommandArgs} />
+                {/* Primary Action Button & Summary */}
+                <div className="bg-[#121215] border border-zinc-800 rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xl">
+                  <div className="flex items-center gap-3 w-full sm:w-auto">
+                    <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+                      <Zap className="w-5 h-5 fill-current" />
+                    </div>
+                    <div>
+                      <div className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
+                        <span>Ready to convert to</span>
+                        <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono text-xs uppercase font-bold">
+                          .{config.container}
+                        </span>
+                      </div>
+                      <div className="text-xs text-zinc-400 font-mono mt-0.5">
+                        {config.videoCodec === 'copy' && config.audioCodec === 'copy'
+                          ? '⚡ Instant Stream Pass-Through (Lossless, 0% quality loss)'
+                          : `${config.videoCodec} • ${config.audioCodec} • Local WebAssembly`}
+                      </div>
+                    </div>
+                  </div>
 
-                {/* Primary Action Button */}
-                <div className="flex items-center justify-end gap-3 pt-2">
                   <button
                     onClick={handleStartConversion}
                     disabled={!engineReady || isConverting}
-                    className="w-full sm:w-auto px-8 py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-zinc-950 font-sans font-semibold text-sm transition-all shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-zinc-950 font-sans font-bold text-sm tracking-wide transition-all shadow-lg shadow-emerald-500/25 flex items-center justify-center gap-2.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed hover:scale-[1.02] active:scale-[0.98]"
                   >
                     <Zap className="w-4 h-4 fill-current" />
                     <span>
                       {config.videoCodec === 'copy' && config.audioCodec === 'copy'
-                        ? 'START FAST REMUX'
-                        : 'START TRANSCODE PIPELINE'}
+                        ? `CONVERT TO .${config.container.toUpperCase()} (FAST REMUX)`
+                        : `CONVERT TO .${config.container.toUpperCase()} NOW`}
                     </span>
                   </button>
                 </div>
+
+                <CommandPreview commandArgs={currentCommandArgs} />
               </div>
             )}
           </div>
