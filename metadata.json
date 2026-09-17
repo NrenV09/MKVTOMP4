@@ -1,6 +1,6 @@
 {
   "name": "MKV to MP4 Converter",
-  "description": "Convert MKV videos to MP4 format locally in your browser using WebAssembly.",
+  "description": "Professional client-side WebAssembly media conversion workstation for universal video and audio transcoding, remuxing, and stream inspection.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

@@ -1,300 +1,561 @@
-import { useState, useRef, useEffect, ChangeEvent } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile } from '@ffmpeg/util';
-import { FileVideo, UploadCloud, Loader2, Download, AlertCircle, ArrowRight, Settings2 } from 'lucide-react';
+import { 
+  Play, 
+  Settings2, 
+  RotateCcw, 
+  AlertCircle, 
+  Zap, 
+  Sliders, 
+  Loader2,
+  HardDrive,
+  FileVideo,
+  CheckCircle2
+} from 'lucide-react';
 
-// Use Vite's asset handling to bundle and get URLs for the required files
 import coreURL from '@ffmpeg/core?url';
 import wasmURL from '@ffmpeg/core/wasm?url';
 import workerURL from '@ffmpeg/ffmpeg/worker?worker&url';
 
-export default function App() {
-  const [loaded, setLoaded] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [isConverting, setIsConverting] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [error, setError] = useState<string | null>(null);
-  const [videoFile, setVideoFile] = useState<File | null>(null);
-  const [outputUrl, setOutputUrl] = useState<string | null>(null);
-  const [mode, setMode] = useState<'remux' | 'transcode'>('remux');
-  
-  const ffmpegRef = useRef(new FFmpeg());
-  const fileInputRef = useRef<HTMLInputElement>(null);
+import { 
+  SourceMetadata, 
+  EncodingConfig, 
+  ProgressTelemetry, 
+  LogMessage, 
+  ConversionResult 
+} from './types';
+import { 
+  buildFFmpegArgs, 
+  getRecommendedExtension, 
+  getMimeType, 
+  formatDuration,
+  checkCompatibility
+} from './utils/ffmpegBuilder';
+import { parseFFmpegProbeLogs, probeMediaElement } from './utils/probe';
 
-  useEffect(() => {
-    load();
+import { Header } from './components/Header';
+import { MediaDropzone } from './components/MediaDropzone';
+import { SourceInspector } from './components/SourceInspector';
+import { EncodingControls } from './components/EncodingControls';
+import { CommandPreview } from './components/CommandPreview';
+import { ProgressEngine } from './components/ProgressEngine';
+import { ResultPanel } from './components/ResultPanel';
+import { TerminalDock } from './components/TerminalDock';
+
+const DEFAULT_CONFIG: EncodingConfig = {
+  targetCategory: 'video',
+  container: 'mp4',
+  videoCodec: 'libx264',
+  rateControl: 'crf',
+  crf: 23,
+  videoBitrate: '4000k',
+  resolution: 'source',
+  framerate: 'source',
+  speedPreset: 'veryfast',
+  audioCodec: 'aac',
+  audioBitrate: '192k',
+  audioChannels: 'source',
+  audioSampleRate: 'source',
+};
+
+export default function App() {
+  const [engineReady, setEngineReady] = useState(false);
+  const [engineLoading, setEngineLoading] = useState(false);
+  const [engineError, setEngineError] = useState<string | null>(null);
+
+  const [rawFile, setRawFile] = useState<File | null>(null);
+  const [sourceMeta, setSourceMeta] = useState<SourceMetadata | null>(null);
+  const [isProbing, setIsProbing] = useState(false);
+
+  const [config, setConfig] = useState<EncodingConfig>(DEFAULT_CONFIG);
+  const [isConverting, setIsConverting] = useState(false);
+  const [conversionError, setConversionError] = useState<string | null>(null);
+
+  const [telemetry, setTelemetry] = useState<ProgressTelemetry>({
+    percent: 0,
+    currentTime: 0,
+    duration: 0,
+    fps: 0,
+    speed: '',
+    elapsedMs: 0,
+    etaSeconds: null,
+  });
+
+  const [result, setResult] = useState<ConversionResult | null>(null);
+
+  const [logs, setLogs] = useState<LogMessage[]>([]);
+  const [terminalOpen, setTerminalOpen] = useState(false);
+
+  const ffmpegRef = useRef<FFmpeg | null>(null);
+  const startTimeRef = useRef<number>(0);
+  const probeLogsBuffer = useRef<string[]>([]);
+  const activeVirtualFiles = useRef<{ inName?: string; outName?: string }>({});
+
+  const addLog = useCallback((type: 'stdout' | 'stderr' | 'system' | 'error', text: string) => {
+    const time = new Date().toTimeString().split(' ')[0] + '.' + String(new Date().getMilliseconds()).padStart(3, '0');
+    setLogs((prev) => [
+      ...prev.slice(-400), // Keep last 400 entries to maintain high performance
+      {
+        id: Math.random().toString(36).substring(2, 9),
+        timestamp: time,
+        type,
+        text,
+      },
+    ]);
   }, []);
 
-  const load = async () => {
-    setIsLoading(true);
-    setError(null);
+  // Initialize FFmpeg WebAssembly core
+  const initEngine = async () => {
+    if (ffmpegRef.current && ffmpegRef.current.loaded) {
+      setEngineReady(true);
+      return;
+    }
+
+    setEngineLoading(true);
+    setEngineError(null);
+    addLog('system', 'Bootstrapping FFmpeg WebAssembly Core v0.12...');
+
     try {
-      console.log('Loading FFmpeg started...');
-      const ffmpeg = ffmpegRef.current;
-      
-      ffmpeg.on('log', ({ message }) => {
-        console.log('FFmpeg log:', message);
+      const ffmpeg = new FFmpeg();
+      ffmpegRef.current = ffmpeg;
+
+      ffmpeg.on('log', ({ type, message }) => {
+        addLog(type || 'stderr', message);
+
+        // Feed into probe log buffer during file inspection
+        if (probeLogsBuffer.current) {
+          probeLogsBuffer.current.push(message);
+        }
+
+        // Live speed / frame parsing from ffmpeg stderr
+        if (message.includes('frame=') && message.includes('fps=')) {
+          const fpsMatch = message.match(/fps=\s*([\d.]+)/);
+          const speedMatch = message.match(/speed=\s*([\d.x]+)/);
+          const timeMatch = message.match(/time=\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/);
+
+          if (fpsMatch || speedMatch || timeMatch) {
+            setTelemetry((prev) => {
+              let curTime = prev.currentTime;
+              if (timeMatch) {
+                const h = parseFloat(timeMatch[1]);
+                const m = parseFloat(timeMatch[2]);
+                const s = parseFloat(timeMatch[3]);
+                curTime = h * 3600 + m * 60 + s;
+              }
+
+              return {
+                ...prev,
+                fps: fpsMatch ? Math.round(parseFloat(fpsMatch[1])) : prev.fps,
+                speed: speedMatch ? speedMatch[1] : prev.speed,
+                currentTime: curTime,
+              };
+            });
+          }
+        }
       });
-      
-      ffmpeg.on('progress', ({ progress }) => {
-        setProgress(Math.round(progress * 100));
+
+      ffmpeg.on('progress', ({ progress, time }) => {
+        const rawPercent = progress > 1 ? progress : progress * 100;
+        const now = Date.now();
+        const elapsed = now - startTimeRef.current;
+
+        setTelemetry((prev) => {
+          const newPercent = Math.min(99.9, Math.max(prev.percent, rawPercent));
+          let eta: number | null = null;
+          if (newPercent > 2 && elapsed > 1000) {
+            const totalEst = (elapsed / (newPercent / 100));
+            eta = Math.max(0, Math.round((totalEst - elapsed) / 1000));
+          }
+
+          return {
+            ...prev,
+            percent: newPercent,
+            elapsedMs: elapsed,
+            etaSeconds: eta,
+            currentTime: time ? time / 1000000 : prev.currentTime,
+          };
+        });
       });
-      
-      console.log('Calling ffmpeg.load()...');
+
       await ffmpeg.load({
         coreURL,
         wasmURL,
         classWorkerURL: workerURL,
       });
-      console.log('ffmpeg.load() finished.');
-      
-      setLoaded(true);
+
+      setEngineReady(true);
+      addLog('system', 'FFmpeg WebAssembly Core successfully mounted. MEMFS ready.');
     } catch (err: any) {
-      console.error('Failed to load FFmpeg', err);
-      setError('Failed to load the media conversion engine: ' + (err?.message || err));
+      console.error('FFmpeg load error:', err);
+      const msg = err?.message || 'Failed to initialize WebAssembly engine.';
+      setEngineError(msg);
+      addLog('error', `Engine init failure: ${msg}`);
     } finally {
-      setIsLoading(false);
+      setEngineLoading(false);
     }
   };
 
-  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      if (!file.name.toLowerCase().endsWith('.mkv')) {
-        setError('Please select a valid .mkv file.');
-        return;
+  useEffect(() => {
+    initEngine();
+  }, []);
+
+  // Inspect source media file
+  const handleFileSelected = async (file: File) => {
+    setRawFile(file);
+    setResult(null);
+    setConversionError(null);
+    setIsProbing(true);
+
+    const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
+    const isAudioOnly = ['.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac'].includes(ext);
+
+    addLog('system', `Loaded source file: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
+
+    // 1. Initial fast HTML5 probe
+    const htmlMeta = await probeMediaElement(file);
+
+    let initialMeta: SourceMetadata = {
+      name: file.name,
+      size: file.size,
+      type: file.type || 'video/unknown',
+      extension: ext,
+      duration: htmlMeta.duration,
+      width: htmlMeta.width,
+      height: htmlMeta.height,
+      hasVideo: isAudioOnly ? false : (htmlMeta.hasVideo ?? true),
+      hasAudio: htmlMeta.hasAudio ?? true,
+    };
+
+    setSourceMeta(initialMeta);
+
+    // Adapt default configuration intelligently
+    if (isAudioOnly) {
+      setConfig((prev) => ({
+        ...prev,
+        targetCategory: 'audio',
+        container: 'mp3',
+        audioCodec: 'libmp3lame',
+      }));
+    } else if (ext === '.mkv') {
+      // Default MKV to MP4 with Remux (Stream Copy) or H.264
+      setConfig((prev) => ({
+        ...prev,
+        targetCategory: 'video',
+        container: 'mp4',
+        videoCodec: 'copy',
+        audioCodec: 'copy',
+      }));
+    }
+
+    // 2. Comprehensive stream inspection via FFmpeg
+    if (ffmpegRef.current && ffmpegRef.current.loaded) {
+      try {
+        probeLogsBuffer.current = [];
+        const tempName = `probe_${Date.now()}${ext}`;
+        addLog('system', `Probing stream headers for ${file.name}...`);
+
+        // Write small chunk or full file for header parsing
+        await ffmpegRef.current.writeFile(tempName, await fetchFile(file));
+        // Calling ffmpeg -i tempName will dump stream layout to logs and return 1
+        await ffmpegRef.current.exec(['-i', tempName]);
+
+        const parsed = parseFFmpegProbeLogs(probeLogsBuffer.current);
+
+        setSourceMeta((prev) => {
+          if (!prev) return null;
+          return {
+            ...prev,
+            duration: parsed.duration || prev.duration,
+            width: parsed.width || prev.width,
+            height: parsed.height || prev.height,
+            fps: parsed.fps || prev.fps,
+            videoCodec: parsed.videoCodec,
+            audioCodec: parsed.audioCodec,
+            audioSampleRate: parsed.audioSampleRate,
+            audioChannels: parsed.audioChannels,
+            bitrate: parsed.bitrate,
+            parsedStreams: parsed.parsedStreams,
+          };
+        });
+
+        // Clean up temporary probe file from virtual MEMFS
+        try {
+          await ffmpegRef.current.deleteFile(tempName);
+        } catch {
+          // ignore cleanup err
+        }
+
+        addLog('system', 'Stream layout inspection complete.');
+      } catch (err) {
+        // Handled silently since probe logs contain what we need
       }
-      setVideoFile(file);
-      setOutputUrl(null);
-      setProgress(0);
-      setError(null);
     }
+
+    setIsProbing(false);
   };
 
-  const handleConvert = async () => {
-    if (!videoFile) return;
-    
+  const handleClearFile = () => {
+    setRawFile(null);
+    setSourceMeta(null);
+    setResult(null);
+    setConversionError(null);
+    setTelemetry({
+      percent: 0,
+      currentTime: 0,
+      duration: 0,
+      fps: 0,
+      speed: '',
+      elapsedMs: 0,
+      etaSeconds: null,
+    });
+  };
+
+  // Convert execution
+  const handleStartConversion = async () => {
+    if (!rawFile || !sourceMeta || !ffmpegRef.current) return;
+
+    // Safety validation
+    const compat = checkCompatibility(sourceMeta, config);
+    if (!compat.isCompatible && compat.warning?.includes('does not contain an audio track')) {
+      setConversionError(compat.warning);
+      return;
+    }
+
     setIsConverting(true);
-    setError(null);
-    setProgress(0);
-    setOutputUrl(null);
-    
+    setConversionError(null);
+    setResult(null);
+
+    startTimeRef.current = Date.now();
+    setTelemetry({
+      percent: 0,
+      currentTime: 0,
+      duration: sourceMeta.duration || 0,
+      fps: 0,
+      speed: '',
+      elapsedMs: 0,
+      etaSeconds: null,
+    });
+
+    const extIn = sourceMeta.extension || '.mkv';
+    const extOut = getRecommendedExtension(config.container);
+    const virtualIn = `input_${Date.now()}${extIn}`;
+    const virtualOut = `output_${Date.now()}${extOut}`;
+    activeVirtualFiles.current = { inName: virtualIn, outName: virtualOut };
+
+    addLog('system', `Mounting ${rawFile.name} to MEMFS as ${virtualIn}...`);
+
     try {
       const ffmpeg = ffmpegRef.current;
-      
-      // Write the file to FFmpeg's virtual file system
-      await ffmpeg.writeFile('input.mkv', await fetchFile(videoFile));
-      
-      // Build command based on selected mode
-      const command = mode === 'remux' 
-        ? ['-i', 'input.mkv', '-c', 'copy', 'output.mp4']
-        : ['-i', 'input.mkv', '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', 'output.mp4'];
-        
-      const ret = await ffmpeg.exec(command);
-      
-      if (ret !== 0) {
-        throw new Error('Conversion failed. If Remux failed, try the Transcode mode instead.');
+
+      // 1. Write file into WebAssembly MEMFS
+      await ffmpeg.writeFile(virtualIn, await fetchFile(rawFile));
+
+      // 2. Build parameter vector
+      const args = buildFFmpegArgs(virtualIn, virtualOut, config, sourceMeta);
+      addLog('system', `Executing: ffmpeg ${args.join(' ')}`);
+
+      // 3. Execute FFmpeg command
+      const returnCode = await ffmpeg.exec(args);
+
+      if (returnCode !== 0) {
+        throw new Error(
+          `FFmpeg conversion returned exit code ${returnCode}. ` +
+          (config.videoCodec === 'copy' || config.audioCodec === 'copy'
+            ? 'Stream copy failed because source codecs are incompatible with target container. Try switching to re-encode (H.264/AAC).'
+            : 'Check console telemetry for detailed codec diagnostics.')
+        );
       }
-      
-      // Read the output file
-      const data = await ffmpeg.readFile('output.mp4');
-      
-      // Create a URL for the output file
-      const blob = new Blob([(data as Uint8Array).buffer], { type: 'video/mp4' });
-      const url = URL.createObjectURL(blob);
-      setOutputUrl(url);
+
+      // 4. Read generated output from virtual filesystem
+      addLog('system', `Reading output file ${virtualOut} from MEMFS...`);
+      const outputData = await ffmpeg.readFile(virtualOut);
+      const mimeType = getMimeType(config.container);
+      const blob = new Blob([(outputData as Uint8Array).buffer], { type: mimeType });
+      const outputUrl = URL.createObjectURL(blob);
+
+      const baseName = sourceMeta.name.replace(/\.[^/.]+$/, '');
+      const finalOutputName = `${baseName}_converted${extOut}`;
+      const elapsed = Date.now() - startTimeRef.current;
+
+      setResult({
+        outputUrl,
+        blob,
+        outputName: finalOutputName,
+        outputSize: blob.size,
+        durationSeconds: sourceMeta.duration,
+        container: config.container,
+        elapsedMs: elapsed,
+        command: args,
+      });
+
+      addLog('system', `Conversion finished successfully in ${(elapsed / 1000).toFixed(1)}s.`);
+
+      // 5. CRITICAL: Unlink and cleanup files from MEMFS to prevent memory leaks
+      try {
+        await ffmpeg.deleteFile(virtualIn);
+        await ffmpeg.deleteFile(virtualOut);
+        addLog('system', `MEMFS garbage collection: Unlinked ${virtualIn} and ${virtualOut}.`);
+      } catch (cleanupErr) {
+        console.warn('Cleanup non-fatal warning:', cleanupErr);
+      }
     } catch (err: any) {
-      console.error('Error during conversion', err);
-      setError(err.message || 'An error occurred during conversion.');
+      console.error('Conversion failed:', err);
+      const errorMsg = err?.message || 'Media conversion failed.';
+      setConversionError(errorMsg);
+      addLog('error', `Execution failed: ${errorMsg}`);
     } finally {
       setIsConverting(false);
     }
   };
 
-  const formatFileSize = (bytes: number) => {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  // Abort ongoing job
+  const handleAbort = async () => {
+    addLog('error', 'User aborted conversion process. Terminating WebAssembly worker...');
+    if (ffmpegRef.current) {
+      try {
+        ffmpegRef.current.terminate();
+      } catch {
+        // ignore
+      }
+    }
+    setIsConverting(false);
+    setConversionError('Conversion process was terminated by user.');
+    setEngineReady(false);
+    // Reboot engine
+    initEngine();
   };
 
+  // Generate current command preview args
+  const currentCommandArgs = buildFFmpegArgs(
+    sourceMeta ? `input${sourceMeta.extension}` : 'input.mkv',
+    `output${getRecommendedExtension(config.container)}`,
+    config,
+    sourceMeta
+  );
+
   return (
-    <div className="min-h-screen bg-neutral-50 flex items-center justify-center p-6 text-neutral-900 font-sans">
-      <div className="max-w-2xl w-full bg-white rounded-2xl shadow-sm border border-neutral-200 overflow-hidden">
-        
-        {/* Header */}
-        <div className="px-8 py-6 border-b border-neutral-100 flex items-center gap-4">
-          <div className="w-12 h-12 bg-blue-50 rounded-xl flex items-center justify-center text-blue-600 shrink-0">
-            <FileVideo className="w-6 h-6" />
-          </div>
-          <div>
-            <h1 className="text-xl font-semibold tracking-tight">MKV to MP4 Converter</h1>
-            <p className="text-sm text-neutral-500 mt-1">Convert videos locally in your browser. No files are uploaded to any server.</p>
-          </div>
-        </div>
+    <div className="min-h-screen bg-[#09090b] text-zinc-100 flex flex-col font-sans selection:bg-emerald-500/20 selection:text-emerald-300">
+      {/* Workstation Header */}
+      <Header
+        engineReady={engineReady}
+        engineLoading={engineLoading}
+        terminalOpen={terminalOpen}
+        toggleTerminal={() => setTerminalOpen(!terminalOpen)}
+        logCount={logs.length}
+      />
 
-        {/* Content */}
-        <div className="p-8">
-          
-          {/* Error Message */}
-          {error && (
-            <div className="mb-6 p-4 bg-red-50 text-red-700 rounded-xl flex items-start gap-3 border border-red-100">
-              <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
-              <p className="text-sm font-medium">{error}</p>
+      {/* Main Workstation Canvas */}
+      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5 lg:p-6 space-y-4">
+        {/* Engine Alert (if loading error) */}
+        {engineError && (
+          <div className="p-4 rounded-xl bg-red-950/40 border border-red-800/80 text-red-200 text-xs font-mono flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-semibold text-red-400 text-sm">Media Engine Failed to Initialize</div>
+              <p className="mt-1 text-red-300/90">{engineError}</p>
+              <button
+                onClick={initEngine}
+                className="mt-2.5 px-3 py-1 rounded bg-red-900 hover:bg-red-800 text-red-100 border border-red-700 transition-colors"
+              >
+                Retry Initialization
+              </button>
             </div>
-          )}
+          </div>
+        )}
 
-          {/* Engine Loading State */}
-          {!loaded ? (
-            <div className="flex flex-col items-center justify-center py-16 text-neutral-500 space-y-4">
-              <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
-              <p className="text-sm font-medium">Initializing WebAssembly Media Engine...</p>
+        {/* Global Conversion Error */}
+        {conversionError && (
+          <div className="p-4 rounded-xl bg-red-950/40 border border-red-800/80 text-red-200 text-xs font-mono flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <div className="font-semibold text-red-400 text-sm">Conversion Pipeline Error</div>
+              <p className="mt-1 text-red-300/90">{conversionError}</p>
+              <div className="mt-2 text-[11px] text-zinc-400">
+                Tip: If you used "Stream Copy", the source video/audio codecs may not fit into the chosen container. Select "H.264 / AAC" under encoding controls to re-encode.
+              </div>
             </div>
-          ) : (
-            <div className="space-y-8">
-              
-              {/* File Selection Area */}
-              {!videoFile ? (
-                <button 
-                  onClick={() => fileInputRef.current?.click()}
-                  className="w-full flex flex-col items-center justify-center py-16 px-6 border-2 border-dashed border-neutral-200 rounded-2xl hover:border-blue-400 hover:bg-blue-50/50 transition-colors group cursor-pointer"
-                >
-                  <div className="w-16 h-16 bg-neutral-100 rounded-full flex items-center justify-center text-neutral-400 group-hover:text-blue-500 group-hover:bg-blue-100 transition-colors mb-4">
-                    <UploadCloud className="w-8 h-8" />
-                  </div>
-                  <h3 className="text-lg font-medium text-neutral-900">Select an MKV file</h3>
-                  <p className="text-sm text-neutral-500 mt-1 text-center max-w-sm">Click to browse your local files. Processing happens entirely on your device.</p>
-                </button>
-              ) : (
-                <div className="bg-neutral-50 rounded-2xl p-6 border border-neutral-200">
-                  <div className="flex items-center justify-between mb-6">
-                    <div className="flex items-center gap-3 overflow-hidden">
-                      <div className="w-10 h-10 bg-indigo-100 text-indigo-600 rounded-lg flex items-center justify-center shrink-0">
-                        <FileVideo className="w-5 h-5" />
-                      </div>
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium text-neutral-900 truncate">{videoFile.name}</p>
-                        <p className="text-xs text-neutral-500 mt-0.5">{formatFileSize(videoFile.size)}</p>
-                      </div>
-                    </div>
-                    {!isConverting && !outputUrl && (
-                      <button 
-                        onClick={() => {
-                          setVideoFile(null);
-                          setOutputUrl(null);
-                          setProgress(0);
-                        }}
-                        className="text-xs font-medium text-neutral-500 hover:text-neutral-900 transition-colors"
-                      >
-                        Change File
-                      </button>
-                    )}
-                  </div>
+          </div>
+        )}
 
-                  {/* Settings */}
-                  {!isConverting && !outputUrl && (
-                    <div className="mb-6 p-4 bg-white rounded-xl border border-neutral-200 space-y-3">
-                      <div className="flex items-center gap-2 text-sm font-semibold text-neutral-900">
-                        <Settings2 className="w-4 h-4 text-neutral-500" />
-                        Conversion Mode
-                      </div>
-                      <div className="grid grid-cols-2 gap-3">
-                        <button
-                          onClick={() => setMode('remux')}
-                          className={`p-3 rounded-lg border text-left transition-colors ${
-                            mode === 'remux' 
-                              ? 'border-blue-600 bg-blue-50 ring-1 ring-blue-600' 
-                              : 'border-neutral-200 hover:border-neutral-300'
-                          }`}
-                        >
-                          <div className="text-sm font-medium text-neutral-900">Remux (Copy)</div>
-                          <div className="text-xs text-neutral-500 mt-1">Instant. Preserves original video/audio codecs. Fails if codecs are unsupported in MP4.</div>
-                        </button>
-                        <button
-                          onClick={() => setMode('transcode')}
-                          className={`p-3 rounded-lg border text-left transition-colors ${
-                            mode === 'transcode' 
-                              ? 'border-blue-600 bg-blue-50 ring-1 ring-blue-600' 
-                              : 'border-neutral-200 hover:border-neutral-300'
-                          }`}
-                        >
-                          <div className="text-sm font-medium text-neutral-900">Transcode</div>
-                          <div className="text-xs text-neutral-500 mt-1">Slow. Re-encodes to H.264/AAC for maximum compatibility across all devices.</div>
-                        </button>
-                      </div>
-                    </div>
-                  )}
+        {/* 1. SOURCE SELECTION / INSPECTOR */}
+        {!sourceMeta ? (
+          <div className="space-y-3">
+            <MediaDropzone
+              onFileSelected={handleFileSelected}
+              disabled={!engineReady || engineLoading}
+            />
 
-                  {/* Action Area */}
-                  {!outputUrl ? (
-                    <div className="mt-4">
-                      {isConverting ? (
-                        <div className="space-y-3">
-                          <div className="flex justify-between text-sm font-medium">
-                            <span className="text-blue-600">Converting...</span>
-                            <span className="text-neutral-900">{progress}%</span>
-                          </div>
-                          <div className="w-full bg-neutral-200 rounded-full h-2 overflow-hidden">
-                            <div 
-                              className="bg-blue-600 h-2 rounded-full transition-all duration-300 ease-out" 
-                              style={{ width: `${progress}%` }} 
-                            />
-                          </div>
-                          {mode === 'transcode' && (
-                            <p className="text-xs text-center text-neutral-500 mt-2">Transcoding takes time. Please keep this tab open.</p>
-                          )}
-                        </div>
-                      ) : (
-                        <button 
-                          onClick={handleConvert}
-                          className="w-full py-3 px-4 bg-neutral-900 hover:bg-neutral-800 text-white font-medium rounded-xl transition-colors flex items-center justify-center gap-2"
-                        >
-                          Start Conversion <ArrowRight className="w-4 h-4" />
-                        </button>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="mt-6 pt-6 border-t border-neutral-200 flex flex-col items-center justify-center space-y-4">
-                      <div className="w-12 h-12 bg-green-100 text-green-600 rounded-full flex items-center justify-center mb-2">
-                        <Download className="w-6 h-6" />
-                      </div>
-                      <h3 className="text-lg font-medium text-neutral-900">Conversion Complete</h3>
-                      <div className="flex gap-3 w-full">
-                        <a 
-                          href={outputUrl} 
-                          download={`${videoFile.name.replace(/\.[^/.]+$/, "")}.mp4`}
-                          className="flex-1 py-3 px-4 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-xl transition-colors flex items-center justify-center gap-2"
-                        >
-                          Download MP4
-                        </a>
-                        <button 
-                          onClick={() => {
-                            setVideoFile(null);
-                            setOutputUrl(null);
-                            setProgress(0);
-                            if (fileInputRef.current) fileInputRef.current.value = '';
-                          }}
-                          className="py-3 px-6 bg-white hover:bg-neutral-50 text-neutral-700 border border-neutral-200 font-medium rounded-xl transition-colors"
-                        >
-                          Convert Another
-                        </button>
-                      </div>
-                    </div>
-                  )}
+            {!engineReady && !engineError && (
+              <div className="flex items-center justify-center gap-2 text-xs font-mono text-zinc-500 py-2">
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+                <span>Mounting WebAssembly engine in background...</span>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <SourceInspector
+              source={sourceMeta}
+              isProbing={isProbing}
+              onClear={handleClearFile}
+              disabled={isConverting}
+            />
+
+            {/* 2. RESULT PANEL (If completed) */}
+            {result ? (
+              <ResultPanel
+                result={result}
+                source={sourceMeta}
+                onReset={handleClearFile}
+                onAdjustSettings={() => setResult(null)}
+              />
+            ) : isConverting ? (
+              /* 3. ACTIVE CONVERSION PROGRESS ENGINE */
+              <ProgressEngine
+                telemetry={telemetry}
+                onCancel={handleAbort}
+                outputName={sourceMeta.name.replace(/\.[^/.]+$/, '') + getRecommendedExtension(config.container)}
+              />
+            ) : (
+              /* 4. ENCODING CONTROLS & COMMAND PREVIEW */
+              <div className="space-y-4">
+                <EncodingControls
+                  config={config}
+                  onChange={setConfig}
+                  source={sourceMeta}
+                  disabled={isConverting}
+                />
+
+                <CommandPreview commandArgs={currentCommandArgs} />
+
+                {/* Primary Action Button */}
+                <div className="flex items-center justify-end gap-3 pt-2">
+                  <button
+                    onClick={handleStartConversion}
+                    disabled={!engineReady || isConverting}
+                    className="w-full sm:w-auto px-8 py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-zinc-950 font-sans font-semibold text-sm transition-all shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <Zap className="w-4 h-4 fill-current" />
+                    <span>
+                      {config.videoCodec === 'copy' && config.audioCodec === 'copy'
+                        ? 'START FAST REMUX'
+                        : 'START TRANSCODE PIPELINE'}
+                    </span>
+                  </button>
                 </div>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-      
-      <input 
-        type="file" 
-        ref={fileInputRef} 
-        onChange={handleFileChange} 
-        accept=".mkv" 
-        className="hidden" 
+              </div>
+            )}
+          </div>
+        )}
+      </main>
+
+      {/* Terminal Telemetry Dock */}
+      <TerminalDock
+        logs={logs}
+        isOpen={terminalOpen}
+        onClose={() => setTerminalOpen(false)}
+        onClear={() => setLogs([])}
       />
     </div>
   );

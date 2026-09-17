@@ -1,0 +1,264 @@
+import { EncodingConfig, SourceMetadata, ContainerFormat } from '../types';
+
+export function formatBytes(bytes: number, decimals = 2): string {
+  if (!bytes || bytes === 0) return '0 B';
+  const k = 1024;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+}
+
+export function formatDuration(seconds?: number): string {
+  if (!seconds || isNaN(seconds) || seconds < 0) return '--:--';
+  const totalSeconds = Math.floor(seconds);
+  const hrs = Math.floor(totalSeconds / 3600);
+  const mins = Math.floor((totalSeconds % 3600) / 60);
+  const secs = totalSeconds % 60;
+  if (hrs > 0) {
+    return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  }
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
+}
+
+export function getRecommendedExtension(container: ContainerFormat): string {
+  switch (container) {
+    case 'mp4': return '.mp4';
+    case 'webm': return '.webm';
+    case 'mkv': return '.mkv';
+    case 'mov': return '.mov';
+    case 'avi': return '.avi';
+    case 'gif': return '.gif';
+    case 'mp3': return '.mp3';
+    case 'm4a': return '.m4a';
+    case 'wav': return '.wav';
+    case 'flac': return '.flac';
+    case 'ogg': return '.ogg';
+    default: return `.${container}`;
+  }
+}
+
+export function getMimeType(container: ContainerFormat): string {
+  switch (container) {
+    case 'mp4': return 'video/mp4';
+    case 'webm': return 'video/webm';
+    case 'mkv': return 'video/x-matroska';
+    case 'mov': return 'video/quicktime';
+    case 'avi': return 'video/x-msvideo';
+    case 'gif': return 'image/gif';
+    case 'mp3': return 'audio/mpeg';
+    case 'm4a': return 'audio/mp4';
+    case 'wav': return 'audio/wav';
+    case 'flac': return 'audio/flac';
+    case 'ogg': return 'audio/ogg';
+    default: return 'application/octet-stream';
+  }
+}
+
+export interface CompatibilityCheck {
+  isCompatible: boolean;
+  warning?: string;
+  suggestion?: string;
+}
+
+export function checkCompatibility(
+  source: SourceMetadata | null,
+  config: EncodingConfig
+): CompatibilityCheck {
+  if (!source) return { isCompatible: true };
+
+  // Audio extraction
+  if (config.targetCategory === 'audio') {
+    if (!source.hasAudio) {
+      return {
+        isCompatible: false,
+        warning: 'Source file does not contain an audio track to extract.',
+      };
+    }
+    if (config.audioCodec === 'copy') {
+      const srcAudio = (source.audioCodec || '').toLowerCase();
+      if (config.container === 'mp3' && !srcAudio.includes('mp3')) {
+        return {
+          isCompatible: false,
+          warning: `Cannot stream-copy ${srcAudio || 'unknown'} audio into MP3 container.`,
+          suggestion: 'Switch Audio Encoder to MP3 (libmp3lame).',
+        };
+      }
+      if (config.container === 'm4a' && !srcAudio.includes('aac')) {
+        return {
+          isCompatible: false,
+          warning: `Cannot stream-copy ${srcAudio || 'unknown'} audio into M4A container.`,
+          suggestion: 'Switch Audio Encoder to AAC.',
+        };
+      }
+      if (config.container === 'ogg' && !srcAudio.includes('opus') && !srcAudio.includes('vorbis')) {
+        return {
+          isCompatible: false,
+          warning: `Cannot stream-copy ${srcAudio || 'unknown'} audio into OGG container.`,
+          suggestion: 'Switch Audio Encoder to Opus.',
+        };
+      }
+    }
+    return { isCompatible: true };
+  }
+
+  // Video targets
+  if (config.container === 'gif') {
+    return { isCompatible: true };
+  }
+
+  // Stream Copy check
+  if (config.videoCodec === 'copy') {
+    const srcVideo = (source.videoCodec || '').toLowerCase();
+    if (config.container === 'webm' && !srcVideo.includes('vp8') && !srcVideo.includes('vp9') && !srcVideo.includes('av1')) {
+      return {
+        isCompatible: false,
+        warning: `WebM requires VP8/VP9/AV1 video codecs. Source appears to be ${srcVideo || 'H.264/HEVC'}.`,
+        suggestion: 'Switch Video Encoder to VP9 or switch container to MP4/MKV.',
+      };
+    }
+  }
+
+  if (config.audioCodec === 'copy' && source.hasAudio) {
+    const srcAudio = (source.audioCodec || '').toLowerCase();
+    if (config.container === 'webm' && !srcAudio.includes('opus') && !srcAudio.includes('vorbis')) {
+      return {
+        isCompatible: false,
+        warning: `WebM requires Opus or Vorbis audio. Source audio appears to be ${srcAudio || 'AAC/AC3'}.`,
+        suggestion: 'Switch Audio Encoder to Opus.',
+      };
+    }
+  }
+
+  return { isCompatible: true };
+}
+
+export function buildFFmpegArgs(
+  inputFilename: string,
+  outputFilename: string,
+  config: EncodingConfig,
+  source?: SourceMetadata | null
+): string[] {
+  const args: string[] = ['-i', inputFilename];
+
+  // AUDIO ONLY EXTRACTION
+  if (config.targetCategory === 'audio') {
+    args.push('-vn'); // no video
+
+    if (config.audioCodec === 'copy') {
+      args.push('-c:a', 'copy');
+    } else {
+      args.push('-c:a', config.audioCodec);
+
+      if (config.audioCodec !== 'flac' && config.audioCodec !== 'pcm_s16le') {
+        if (config.audioBitrate !== 'lossless') {
+          args.push('-b:a', config.audioBitrate);
+        }
+      }
+
+      if (config.audioChannels === 'mono') {
+        args.push('-ac', '1');
+      } else if (config.audioChannels === 'stereo') {
+        args.push('-ac', '2');
+      } else if (config.audioChannels === '5.1') {
+        args.push('-ac', '6');
+      }
+
+      if (config.audioSampleRate !== 'source') {
+        args.push('-ar', config.audioSampleRate);
+      }
+    }
+
+    args.push(outputFilename);
+    return args;
+  }
+
+  // GIF EXPORT
+  if (config.container === 'gif') {
+    args.push('-an'); // No audio in GIF
+    const scale = config.resolution === 'source' ? 'scale=trunc(iw/2)*2:trunc(ih/2)*2' : `scale=${config.resolution.replace('x', ':')}:flags=lanczos`;
+    const fps = config.framerate === 'source' ? '15' : config.framerate;
+    args.push('-vf', `fps=${fps},${scale},split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse`);
+    args.push(outputFilename);
+    return args;
+  }
+
+  // VIDEO CONVERSION
+  // 1. Video Codec
+  if (config.videoCodec === 'copy') {
+    args.push('-c:v', 'copy');
+  } else {
+    args.push('-c:v', config.videoCodec);
+
+    // Speed Preset
+    if (['libx264', 'libx265'].includes(config.videoCodec)) {
+      args.push('-preset', config.speedPreset);
+    }
+
+    // Rate control
+    if (config.rateControl === 'crf') {
+      args.push('-crf', config.crf.toString());
+    } else {
+      args.push('-b:v', config.videoBitrate);
+    }
+
+    // Video filters (Resolution & Framerate)
+    const filters: string[] = [];
+    if (config.resolution !== 'source') {
+      const [w, h] = config.resolution.split('x');
+      // Ensure dimensions are divisible by 2 for H.264
+      filters.push(`scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2`);
+    } else {
+      // Ensure even width/height
+      filters.push('scale=trunc(iw/2)*2:trunc(ih/2)*2');
+    }
+
+    if (config.framerate !== 'source') {
+      filters.push(`fps=${config.framerate}`);
+    }
+
+    if (filters.length > 0) {
+      args.push('-vf', filters.join(','));
+    }
+
+    // Pixel format for universal compatibility with H.264 in browsers
+    if (['libx264', 'libx265'].includes(config.videoCodec)) {
+      args.push('-pix_fmt', 'yuv420p');
+    }
+
+    // Faststart for streaming MP4
+    if (config.container === 'mp4' || config.container === 'mov') {
+      args.push('-movflags', '+faststart');
+    }
+  }
+
+  // 2. Audio Track
+  if (config.audioCodec === 'none') {
+    args.push('-an');
+  } else if (config.audioCodec === 'copy') {
+    args.push('-c:a', 'copy');
+  } else {
+    args.push('-c:a', config.audioCodec);
+
+    if (config.audioCodec !== 'flac' && config.audioCodec !== 'pcm_s16le') {
+      if (config.audioBitrate !== 'lossless') {
+        args.push('-b:a', config.audioBitrate);
+      }
+    }
+
+    if (config.audioChannels === 'mono') {
+      args.push('-ac', '1');
+    } else if (config.audioChannels === 'stereo') {
+      args.push('-ac', '2');
+    } else if (config.audioChannels === '5.1') {
+      args.push('-ac', '6');
+    }
+
+    if (config.audioSampleRate !== 'source') {
+      args.push('-ar', config.audioSampleRate);
+    }
+  }
+
+  args.push(outputFilename);
+  return args;
+}
