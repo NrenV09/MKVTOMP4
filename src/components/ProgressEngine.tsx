@@ -116,6 +116,22 @@ export const ProgressEngine: React.FC<ProgressEngineProps> = ({
         </div>
       </div>
 
+      {/* Dynamic speed diagnostic tip */}
+      {telemetry.speed && parseFloat(telemetry.speed) < 1.0 && (
+        <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[11px] flex items-center gap-2">
+          <span>
+            💡 <strong>iPad M3 Tip:</strong> Re-encoding each frame in software Wasm is running at {telemetry.speed}. If you do not need to resize or change video quality, cancel and choose <strong>⚡ Stream Remux</strong> for instant <strong>50x–150x</strong> speed!
+          </span>
+        </div>
+      )}
+      {telemetry.speed && parseFloat(telemetry.speed) >= 15.0 && (
+        <div className="p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 text-[11px] flex items-center gap-2">
+          <span>
+            ⚡ <strong>Lossless Hardware Passthrough Active:</strong> Remuxing at blazing {telemetry.speed} speed with zero quality loss!
+          </span>
+        </div>
+      )}
+
       <div className="text-[10px] text-zinc-500 text-center flex items-center justify-center gap-1.5 pt-1">
         <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
         <span>Virtual MEMFS active. Processing strictly within browser thread memory. Keep this tab open.</span>

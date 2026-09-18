@@ -1,10 +1,11 @@
 import React from 'react';
-import { Cpu, Terminal, HardDrive, Sun, Trash2 } from 'lucide-react';
+import { Cpu, Terminal, HardDrive, Sun, Trash2, Zap } from 'lucide-react';
 import { detectDeviceCapabilities } from '../utils/ffmpegBuilder';
 
 interface HeaderProps {
   engineReady: boolean;
   engineLoading: boolean;
+  engineMode?: 'mt' | 'st';
   terminalOpen: boolean;
   toggleTerminal: () => void;
   logCount: number;
@@ -15,6 +16,7 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({
   engineReady,
   engineLoading,
+  engineMode = 'st',
   terminalOpen,
   toggleTerminal,
   logCount,
@@ -35,9 +37,15 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="font-semibold text-zinc-100 tracking-tight text-sm">
               MKV to MP4 Converter
             </span>
+            {dev.isApple && (
+              <span className="hidden md:inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 font-medium">
+                <Zap className="w-2.5 h-2.5" />
+                {dev.chipLabel}
+              </span>
+            )}
           </div>
           <div className="text-[11px] text-zinc-500 font-mono">
-            FFmpeg WebAssembly Core v0.12
+            FFmpeg WebAssembly Core v0.12 • {engineMode === 'mt' ? 'Multi-Threaded' : 'Single-Thread'}
           </div>
         </div>
       </div>
@@ -46,7 +54,7 @@ export const Header: React.FC<HeaderProps> = ({
       <div className="hidden lg:flex items-center gap-2">
         <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-zinc-900 border border-zinc-800 text-zinc-300 font-mono text-[11px]">
           <Cpu className="w-3.5 h-3.5 text-emerald-400" />
-          <span className="text-zinc-400">THREADS:</span>
+          <span className="text-zinc-400">HARDWARE CORES:</span>
           <span className="text-emerald-400 font-semibold">{dev.cores}</span>
         </div>
 
@@ -63,7 +71,7 @@ export const Header: React.FC<HeaderProps> = ({
           />
           <span className="text-zinc-400">ENGINE:</span>
           <span className={engineReady ? 'text-emerald-400' : 'text-amber-400'}>
-            {engineReady ? 'ONLINE' : engineLoading ? 'INITIALIZING...' : 'OFFLINE'}
+            {engineReady ? (engineMode === 'mt' ? 'MULTI-CORE ONLINE' : 'ONLINE') : engineLoading ? 'INITIALIZING...' : 'OFFLINE'}
           </span>
         </div>
 

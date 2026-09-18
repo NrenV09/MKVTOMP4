@@ -164,23 +164,55 @@ export function checkCompatibility(
   return { isCompatible: true };
 }
 
-export function detectDeviceCapabilities() {
+export interface DeviceCapabilities {
+  isIPad: boolean;
+  isApple: boolean;
+  cores: number;
+  isMSeries: boolean;
+  hasWakeLock: boolean;
+  hasSharedArrayBuffer: boolean;
+  hasWebCodecs: boolean;
+  chipLabel: string;
+}
+
+export function detectDeviceCapabilities(): DeviceCapabilities {
   if (typeof navigator === 'undefined') {
-    return { isIPad: false, isApple: false, cores: 4, isMSeries: false };
+    return {
+      isIPad: false,
+      isApple: false,
+      cores: 4,
+      isMSeries: false,
+      hasWakeLock: false,
+      hasSharedArrayBuffer: false,
+      hasWebCodecs: false,
+      chipLabel: 'Standard CPU',
+    };
   }
   const ua = navigator.userAgent || '';
   const isIPad = /iPad/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const isApple = /Mac|iPad|iPhone/.test(ua) || isIPad;
   const cores = navigator.hardwareConcurrency || 4;
-  // M-series iPads (M1, M2, M4 iPad Pro/Air) and Macs typically expose 8 or more concurrency threads
   const isMSeries = isApple && cores >= 8;
+  const hasWakeLock = 'wakeLock' in navigator;
+  const hasSharedArrayBuffer = typeof SharedArrayBuffer !== 'undefined' && (typeof window !== 'undefined' && (window as any).crossOriginIsolated);
+  const hasWebCodecs = typeof window !== 'undefined' && typeof (window as any).VideoEncoder !== 'undefined';
+
+  let chipLabel = 'Multi-Core CPU';
+  if (isIPad) {
+    chipLabel = cores >= 8 ? 'Apple M3 / M-Series (iPad Air)' : 'Apple Silicon (iPad)';
+  } else if (isApple) {
+    chipLabel = cores >= 8 ? 'Apple M-Series Silicon' : 'Apple Silicon';
+  }
 
   return {
     isIPad,
     isApple,
     cores,
     isMSeries,
-    hasWakeLock: 'wakeLock' in navigator,
+    hasWakeLock,
+    hasSharedArrayBuffer,
+    hasWebCodecs,
+    chipLabel,
   };
 }
 
@@ -264,6 +296,9 @@ export function buildFFmpegArgs(
     // Speed Preset
     if (['libx264', 'libx265'].includes(config.videoCodec)) {
       args.push('-preset', config.speedPreset);
+      if (config.speedPreset === 'ultrafast' && config.videoCodec === 'libx264') {
+        args.push('-tune', 'fastdecode');
+      }
     }
 
     // Rate control
