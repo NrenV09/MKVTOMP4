@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
-import { fetchFile } from '@ffmpeg/util';
+import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import { 
   Play, 
   Settings2, 
@@ -43,6 +43,12 @@ import {
   transcodeWithHardwareWebCodecs, 
   HardwareCapabilities 
 } from './utils/hardwareEngine';
+import {
+  getCachedWasmBlobURL,
+  getWasmCacheStats,
+  WASM_ENGINE_CACHE_NAME,
+  WasmCacheStats,
+} from './utils/wasmCache';
 
 import { Header } from './components/Header';
 import { MediaDropzone } from './components/MediaDropzone';
@@ -105,6 +111,7 @@ export default function App() {
   const [logs, setLogs] = useState<LogMessage[]>([]);
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [wakeLockActive, setWakeLockActive] = useState(false);
+  const [wasmCacheStats, setWasmCacheStats] = useState<WasmCacheStats | null>(null);
 
   const ffmpegRef = useRef<FFmpeg | null>(null);
   const startTimeRef = useRef<number>(0);
@@ -182,18 +189,21 @@ export default function App() {
       } catch {}
     }
 
-    // 4. Purge browser CacheStorage if present
+    // 4. Purge temporary browser caches while PRESERVING the WebAssembly engine cache
     if (typeof window !== 'undefined' && 'caches' in window) {
       try {
         const keys = await window.caches.keys();
         for (const key of keys) {
-          await window.caches.delete(key);
+          if (key !== WASM_ENGINE_CACHE_NAME) {
+            await window.caches.delete(key);
+          }
         }
       } catch {}
     }
 
     setIsPurged(true);
-    addLog('system', 'Purged media cache and released memory buffers.');
+    addLog('system', 'Purged media cache and released memory buffers (WebAssembly engine safely preserved in cache).');
+    getWasmCacheStats().then(setWasmCacheStats);
   }, [addLog, revokeActiveUrl]);
 
   // Initialize FFmpeg WebAssembly core
@@ -296,36 +306,75 @@ export default function App() {
       const dev = detectDeviceCapabilities();
       const hasSAB = typeof SharedArrayBuffer !== 'undefined' && (typeof window !== 'undefined' && (window as any).crossOriginIsolated);
       addLog('system', `Detected hardware: ${dev.chipLabel} (${dev.cores} concurrent threads, Cross-Origin Isolation: ${hasSAB ? 'Active' : 'Standby'}).`);
+      addLog('system', 'Loading self-contained in-app FFmpeg binaries (zero internet connection required)...');
 
       let mtLoaded = false;
       if (hasSAB) {
         try {
-          addLog('system', `Mounting multi-threaded engine for all ${dev.cores} hardware CPU cores...`);
+          addLog('system', `Mounting local multi-threaded engine for all ${dev.cores} hardware CPU cores...`);
+          // Resolve local in-app URLs served directly from the app
+          const corePath = new URL('/ffmpeg/core-mt/ffmpeg-core.js', window.location.href).href;
+          const wasmPath = new URL('/ffmpeg/core-mt/ffmpeg-core.wasm', window.location.href).href;
+          const workerPath = new URL('/ffmpeg/core-mt/ffmpeg-core.worker.js', window.location.href).href;
+
+          // Load from persistent browser cache (or download and cache permanently for offline reuse)
+          const [coreRes, wasmRes, workerRes] = await Promise.all([
+            getCachedWasmBlobURL(corePath, 'text/javascript', coreMTURL),
+            getCachedWasmBlobURL(wasmPath, 'application/wasm', wasmMTURL),
+            getCachedWasmBlobURL(workerPath, 'text/javascript', workerMTURL),
+          ]);
+
+          if (coreRes.fromCache && wasmRes.fromCache) {
+            const cachedMB = ((coreRes.sizeBytes + wasmRes.sizeBytes) / 1024 / 1024).toFixed(1);
+            addLog('system', `WebAssembly multi-threaded core loaded directly from persistent browser cache (${cachedMB} MB, zero network transfer).`);
+          } else {
+            const storedMB = ((coreRes.sizeBytes + wasmRes.sizeBytes) / 1024 / 1024).toFixed(1);
+            addLog('system', `WebAssembly multi-threaded core saved to persistent browser cache (${storedMB} MB).`);
+          }
+
           await ffmpeg.load({
-            coreURL: coreMTURL,
-            wasmURL: wasmMTURL,
-            workerURL: workerMTURL,
+            coreURL: coreRes.blobUrl,
+            wasmURL: wasmRes.blobUrl,
+            workerURL: workerRes.blobUrl,
             classWorkerURL: workerURL,
           });
           mtLoaded = true;
           setEngineMode('mt');
-          addLog('system', `Hardware Multi-Threading active (${dev.cores} worker threads allocated).`);
+          addLog('system', `Hardware Multi-Threading active (${dev.cores} worker threads allocated from persistent cache).`);
         } catch (mtErr: any) {
-          console.warn('Multi-threaded core load skipped, using standard core:', mtErr);
-          addLog('system', `Multi-threading initialization note: ${mtErr?.message || 'sandbox fallback'}. Loading standard engine...`);
+          console.warn('Local multi-threaded core load skipped, falling back to local standard core:', mtErr);
+          addLog('system', `Multi-threading initialization note: ${mtErr?.message || 'sandbox fallback'}. Loading in-app standard engine...`);
         }
       }
 
       if (!mtLoaded) {
+        addLog('system', 'Mounting local single-threaded in-app engine...');
+        const corePath = new URL('/ffmpeg/core/ffmpeg-core.js', window.location.href).href;
+        const wasmPath = new URL('/ffmpeg/core/ffmpeg-core.wasm', window.location.href).href;
+
+        const [coreRes, wasmRes] = await Promise.all([
+          getCachedWasmBlobURL(corePath, 'text/javascript', coreURL),
+          getCachedWasmBlobURL(wasmPath, 'application/wasm', wasmURL),
+        ]);
+
+        if (coreRes.fromCache && wasmRes.fromCache) {
+          const cachedMB = ((coreRes.sizeBytes + wasmRes.sizeBytes) / 1024 / 1024).toFixed(1);
+          addLog('system', `WebAssembly core loaded directly from persistent browser cache (${cachedMB} MB, zero network transfer).`);
+        } else {
+          const storedMB = ((coreRes.sizeBytes + wasmRes.sizeBytes) / 1024 / 1024).toFixed(1);
+          addLog('system', `WebAssembly core saved to persistent browser cache (${storedMB} MB).`);
+        }
+
         await ffmpeg.load({
-          coreURL,
-          wasmURL,
+          coreURL: coreRes.blobUrl,
+          wasmURL: wasmRes.blobUrl,
           classWorkerURL: workerURL,
         });
         setEngineMode('st');
-        addLog('system', 'FFmpeg WebAssembly Core successfully mounted. MEMFS ready.');
+        addLog('system', 'FFmpeg WebAssembly Core successfully mounted from persistent browser cache. 100% offline MEMFS ready.');
       }
       setEngineReady(true);
+      getWasmCacheStats().then(setWasmCacheStats);
     } catch (err: any) {
       console.error('FFmpeg load error:', err);
       const msg = err?.message || 'Failed to initialize WebAssembly engine.';
@@ -802,6 +851,7 @@ export default function App() {
         wakeLockActive={wakeLockActive}
         hardwareCaps={hardwareCaps}
         onPurgeCache={purgeAllCaches}
+        wasmCacheStats={wasmCacheStats}
       />
 
       {/* Main Workstation Canvas */}

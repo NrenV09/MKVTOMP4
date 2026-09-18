@@ -19,6 +19,19 @@ async function startServer() {
     res.json({ status: "ok" });
   });
 
+  // Serve public static assets (including local ffmpeg.wasm binaries)
+  const publicPath = path.join(process.cwd(), 'public');
+  app.use(express.static(publicPath, {
+    maxAge: '365d',
+    setHeaders: (res, filePath) => {
+      res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+      res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
+      if (filePath.includes('ffmpeg') || filePath.endsWith('.wasm')) {
+        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      }
+    }
+  }));
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -28,9 +41,13 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath, {
-      setHeaders: (res, path, stat) => {
+      maxAge: '365d',
+      setHeaders: (res, filePath) => {
         res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
         res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
+        if (filePath.includes('ffmpeg') || filePath.endsWith('.wasm')) {
+          res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+        }
       }
     }));
     app.get('*', (req, res) => {

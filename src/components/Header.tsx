@@ -1,6 +1,7 @@
 import React from 'react';
-import { Terminal, Trash2, Cpu, Zap } from 'lucide-react';
+import { Terminal, Trash2, Cpu, Zap, HardDrive } from 'lucide-react';
 import { HardwareCapabilities } from '../utils/hardwareEngine';
+import { WasmCacheStats } from '../utils/wasmCache';
 
 interface HeaderProps {
   engineReady: boolean;
@@ -12,16 +13,19 @@ interface HeaderProps {
   wakeLockActive?: boolean;
   hardwareCaps?: HardwareCapabilities | null;
   onPurgeCache?: () => void;
+  wasmCacheStats?: WasmCacheStats | null;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   engineReady,
   engineLoading,
+  engineMode,
   terminalOpen,
   toggleTerminal,
   logCount,
   hardwareCaps,
   onPurgeCache,
+  wasmCacheStats,
 }) => {
   return (
     <header className="border-b border-zinc-800 bg-[#0c0c0e] px-4 py-3 flex items-center justify-between text-xs select-none sticky top-0 z-30">
@@ -40,7 +44,18 @@ export const Header: React.FC<HeaderProps> = ({
                 engineReady ? 'bg-emerald-500' : engineLoading ? 'bg-amber-500 animate-pulse' : 'bg-zinc-600'
               }`}
             />
-            <span>{engineReady ? 'Engine Ready' : engineLoading ? 'Initializing...' : 'Offline'}</span>
+            <span>
+              {engineReady
+                ? `In-App Engine Ready (${engineMode === 'mt' ? 'Multi-Thread' : 'Standard'} · Offline)`
+                : engineLoading
+                ? 'Loading in-app binaries...'
+                : 'Offline'}
+            </span>
+            {engineReady && (
+              <span className="hidden sm:inline-block px-1.5 py-0.5 rounded bg-emerald-950/60 border border-emerald-800/60 text-[10px] text-emerald-300 font-medium ml-1">
+                Zero-Network
+              </span>
+            )}
           </div>
         </div>
       </div>
@@ -70,13 +85,25 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       )}
 
-      {/* Right: Actions */}
+      {/* Right: Actions & Cache Info */}
       <div className="flex items-center gap-2">
+        {wasmCacheStats && wasmCacheStats.itemCount > 0 && (
+          <div
+            className="hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-950/80 border border-zinc-800/80 font-mono text-[11px] text-zinc-300"
+            title={`WebAssembly FFmpeg engine is stored in browser cache: ${wasmCacheStats.itemCount} files (${wasmCacheStats.formattedSize})`}
+          >
+            <HardDrive className="w-3.5 h-3.5 text-cyan-400" />
+            <span className="text-zinc-400">Wasm Cache:</span>
+            <span className="text-cyan-300 font-medium">{wasmCacheStats.formattedSize}</span>
+            <span className="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>
+          </div>
+        )}
+
         {onPurgeCache && (
           <button
             onClick={onPurgeCache}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 border-zinc-800"
-            title="Reset converter"
+            title="Reset active media buffers (WebAssembly engine stays safely cached)"
           >
             <Trash2 className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">Reset</span>
