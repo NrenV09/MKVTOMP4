@@ -32,7 +32,7 @@ import {
   formatDuration,
   checkCompatibility
 } from './utils/ffmpegBuilder';
-import { parseFFmpegProbeLogs, probeMediaElement } from './utils/probe';
+import { parseFFmpegProbeLogs, probeMediaElement, AUDIO_EXTENSIONS, getFileExtension } from './utils/probe';
 
 import { Header } from './components/Header';
 import { MediaDropzone } from './components/MediaDropzone';
@@ -265,8 +265,8 @@ export default function App() {
     setConversionError(null);
     setIsProbing(true);
 
-    const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
-    const isAudioOnly = ['.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac'].includes(ext);
+    const ext = getFileExtension(file.name);
+    const isAudioOnly = AUDIO_EXTENSIONS.includes(ext) || (file.type ? file.type.startsWith('audio/') : false);
 
     addLog('system', `Loaded source file: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
 
@@ -276,8 +276,8 @@ export default function App() {
     let initialMeta: SourceMetadata = {
       name: file.name,
       size: file.size,
-      type: file.type || 'video/unknown',
-      extension: ext,
+      type: file.type || 'media/unknown',
+      extension: ext || (isAudioOnly ? '.mp3' : ''),
       duration: htmlMeta.duration,
       width: htmlMeta.width,
       height: htmlMeta.height,
@@ -304,13 +304,23 @@ export default function App() {
         videoCodec: 'copy',
         audioCodec: 'copy',
       }));
+    } else {
+      // For any other file format (WMV, AVI, FLV, M2TS, VOB, TS, WEBM, MOV, etc.) from Files
+      // default to universal H.264 / AAC MP4 for guaranteed compatibility
+      setConfig((prev) => ({
+        ...prev,
+        targetCategory: 'video',
+        container: 'mp4',
+        videoCodec: 'libx264',
+        audioCodec: 'aac',
+      }));
     }
 
     // 2. Comprehensive stream inspection via FFmpeg
     if (ffmpegRef.current && ffmpegRef.current.loaded) {
       try {
         probeLogsBuffer.current = [];
-        const tempName = `probe_${Date.now()}${ext}`;
+        const tempName = `probe_${Date.now()}${ext || ''}`;
         addLog('system', `Probing stream headers for ${file.name}...`);
 
         // Write small chunk or full file for header parsing
@@ -322,6 +332,8 @@ export default function App() {
 
         setSourceMeta((prev) => {
           if (!prev) return null;
+          const hasV = parsed.hasVideo ?? prev.hasVideo;
+          const hasA = parsed.hasAudio ?? prev.hasAudio;
           return {
             ...prev,
             duration: parsed.duration || prev.duration,
@@ -334,8 +346,32 @@ export default function App() {
             audioChannels: parsed.audioChannels,
             bitrate: parsed.bitrate,
             parsedStreams: parsed.parsedStreams,
+            hasVideo: hasV,
+            hasAudio: hasA,
           };
         });
+
+        // If deep probe determined it has no video and only audio, adjust to audio
+        if (!parsed.hasVideo && parsed.hasAudio) {
+          setConfig((prev) => ({
+            ...prev,
+            targetCategory: 'audio',
+            container: prev.targetCategory === 'audio' ? prev.container : 'mp3',
+            audioCodec: prev.targetCategory === 'audio' ? prev.audioCodec : 'libmp3lame',
+          }));
+          addLog('system', 'Detected audio-only stream layout. Configured target for audio export.');
+        } else if (parsed.hasVideo) {
+          // If video was found, check if copy mode is safe for MP4
+          const srcVid = (parsed.videoCodec || '').toLowerCase();
+          const isCopySafe = ['h264', 'avc1', 'hevc', 'h265'].some((c) => srcVid.includes(c));
+          if (!isCopySafe && config.videoCodec === 'copy') {
+            setConfig((prev) => ({
+              ...prev,
+              videoCodec: 'libx264',
+            }));
+            addLog('system', `Source video codec (${srcVid || 'unknown'}) requires transcoding. Switched encoder to H.264.`);
+          }
+        }
 
         // Clean up temporary probe file from virtual MEMFS
         try {
@@ -411,7 +447,7 @@ export default function App() {
       etaSeconds: null,
     });
 
-    const extIn = sourceMeta.extension || '.mkv';
+    const extIn = sourceMeta.extension || '';
     const extOut = getRecommendedExtension(config.container);
     const virtualIn = `input_${Date.now()}${extIn}`;
     const virtualOut = `output_${Date.now()}${extOut}`;
@@ -530,7 +566,7 @@ export default function App() {
 
   // Generate current command preview args
   const currentCommandArgs = buildFFmpegArgs(
-    sourceMeta ? `input${sourceMeta.extension}` : 'input.mkv',
+    sourceMeta ? `input${sourceMeta.extension || ''}` : 'input.media',
     `output${getRecommendedExtension(config.container)}`,
     config,
     sourceMeta

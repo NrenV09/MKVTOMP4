@@ -6,9 +6,9 @@ interface MediaDropzoneProps {
   disabled?: boolean;
 }
 
-const SUPPORTED_EXTS = [
-  'MKV', 'MP4', 'MOV', 'WEBM', 'AVI', 'FLV', 'TS',
-  'MP3', 'WAV', 'AAC', 'FLAC', 'OGG', 'M4A'
+const POPULAR_EXTS = [
+  'MKV', 'MP4', 'MOV', 'WEBM', 'AVI', 'FLV', 'TS', 'M2TS', 'WMV', 'VOB',
+  'MP3', 'WAV', 'AAC', 'FLAC', 'M4A', 'OGG', 'OPUS'
 ];
 
 export const MediaDropzone: React.FC<MediaDropzoneProps> = ({
@@ -44,6 +44,10 @@ export const MediaDropzone: React.FC<MediaDropzoneProps> = ({
     if (file) {
       onFileSelected(file);
     }
+    // Reset value so the user can select the same file again if desired
+    if (e.target) {
+      e.target.value = '';
+    }
   };
 
   return (
@@ -58,11 +62,11 @@ export const MediaDropzone: React.FC<MediaDropzoneProps> = ({
           : 'border-zinc-800 hover:border-emerald-500/50 bg-zinc-950/60 hover:bg-zinc-900/30'
       } ${disabled ? 'opacity-50 cursor-not-allowed pointer-events-none' : ''}`}
     >
+      {/* File input with NO restrictive accept filter to allow all file types from Files app & device */}
       <input
         ref={inputRef}
         type="file"
         onChange={handleInputChange}
-        accept=".mkv,.mp4,.mov,.webm,.avi,.flv,.ts,.mp3,.wav,.aac,.flac,.ogg,.m4a,video/*,audio/*"
         className="hidden"
       />
 
@@ -72,10 +76,10 @@ export const MediaDropzone: React.FC<MediaDropzoneProps> = ({
         </div>
 
         <h3 className="text-base md:text-lg font-semibold text-zinc-100 mb-1.5 tracking-tight">
-          Drop any video or audio file here
+          Drop any file here or browse Files
         </h3>
         <p className="text-xs sm:text-sm text-zinc-400 mb-5 max-w-md leading-relaxed">
-          Processed 100% locally in your browser. Fast MKV to MP4 remuxing, video transcoding, or audio extraction.
+          Supports all video, audio, and media file formats from iPad/iPhone Files, Android, Mac, or PC. Processed 100% locally.
         </p>
 
         {/* Big primary choose file button */}
@@ -89,7 +93,7 @@ export const MediaDropzone: React.FC<MediaDropzoneProps> = ({
 
         {/* Formats info */}
         <div className="flex flex-wrap items-center justify-center gap-1.5 max-w-md">
-          {SUPPORTED_EXTS.map((ext) => (
+          {POPULAR_EXTS.map((ext) => (
             <span
               key={ext}
               className="px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-zinc-900/90 text-zinc-400 border border-zinc-800/80 group-hover:border-zinc-700"
@@ -97,6 +101,9 @@ export const MediaDropzone: React.FC<MediaDropzoneProps> = ({
               .{ext}
             </span>
           ))}
+          <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+            + ALL FILE TYPES
+          </span>
         </div>
       </div>
     </div>

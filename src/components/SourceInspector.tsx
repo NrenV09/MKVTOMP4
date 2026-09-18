@@ -45,7 +45,7 @@ export const SourceInspector: React.FC<SourceInspectorProps> = ({
                 {source.name}
               </span>
               <span className="px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] text-emerald-400 uppercase font-bold tracking-wider">
-                {source.extension.toUpperCase().replace('.', '')}
+                {(source.extension || 'FILE').toUpperCase().replace('.', '')}
               </span>
 
               {/* Badges */}

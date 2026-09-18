@@ -1,6 +1,6 @@
 {
   "name": "MKV to MP4 Converter",
-  "description": "Professional client-side WebAssembly media conversion workstation for universal video and audio transcoding, remuxing, and stream inspection.",
+  "description": "Universal WebAssembly media converter and remuxing workstation supporting all video, audio, and container formats from Files and local storage with zero server uploads.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

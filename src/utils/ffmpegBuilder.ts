@@ -107,15 +107,36 @@ export function checkCompatibility(
     return { isCompatible: true };
   }
 
-  // Stream Copy check
+  // Source has no video track
+  if (!source.hasVideo && source.hasAudio) {
+    return {
+      isCompatible: false,
+      warning: 'Source file contains only audio tracks (no video).',
+      suggestion: 'Switch target format to MP3, M4A, or WAV audio.',
+    };
+  }
+
+  // Stream Copy checks
   if (config.videoCodec === 'copy') {
     const srcVideo = (source.videoCodec || '').toLowerCase();
+
     if (config.container === 'webm' && !srcVideo.includes('vp8') && !srcVideo.includes('vp9') && !srcVideo.includes('av1')) {
       return {
         isCompatible: false,
         warning: `WebM requires VP8/VP9/AV1 video codecs. Source appears to be ${srcVideo || 'H.264/HEVC'}.`,
         suggestion: 'Switch Video Encoder to VP9 or switch container to MP4/MKV.',
       };
+    }
+
+    if (config.container === 'mp4') {
+      const isMp4VideoCompatible = ['h264', 'avc1', 'hevc', 'h265', 'mpeg4', 'av1'].some((c) => srcVideo.includes(c));
+      if (srcVideo && !isMp4VideoCompatible) {
+        return {
+          isCompatible: false,
+          warning: `MP4 container cannot stream-copy '${srcVideo}' video codec.`,
+          suggestion: 'Switch Video Encoder to H.264 (libx264) for clean re-encoding.',
+        };
+      }
     }
   }
 
@@ -127,6 +148,16 @@ export function checkCompatibility(
         warning: `WebM requires Opus or Vorbis audio. Source audio appears to be ${srcAudio || 'AAC/AC3'}.`,
         suggestion: 'Switch Audio Encoder to Opus.',
       };
+    }
+    if (config.container === 'mp4') {
+      const isMp4AudioCompatible = ['aac', 'mp3', 'ac3', 'eac3', 'alac', 'opus'].some((c) => srcAudio.includes(c));
+      if (srcAudio && !isMp4AudioCompatible) {
+        return {
+          isCompatible: false,
+          warning: `MP4 container cannot stream-copy '${srcAudio}' audio codec.`,
+          suggestion: 'Switch Audio Encoder to AAC for universal playback.',
+        };
+      }
     }
   }
 

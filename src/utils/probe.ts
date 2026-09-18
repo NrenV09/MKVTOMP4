@@ -100,20 +100,46 @@ export function parseFFmpegProbeLogs(logs: string[]): Partial<SourceMetadata> {
   return meta;
 }
 
+export const AUDIO_EXTENSIONS = [
+  '.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.wma', '.opus',
+  '.aiff', '.aif', '.alac', '.ac3', '.eac3', '.dts', '.pcm', '.caf',
+  '.mka', '.ra', '.voc', '.amr', '.weba', '.mid', '.midi'
+];
+
+export function getFileExtension(filename: string): string {
+  const lastDot = filename.lastIndexOf('.');
+  if (lastDot < 0) return '';
+  return filename.slice(lastDot).toLowerCase();
+}
+
 /**
- * Attempts fast HTML5 media element inspection as a quick baseline
+ * Attempts fast HTML5 media element inspection as a quick baseline with timeout safeguard
  */
 export async function probeMediaElement(file: File): Promise<Partial<SourceMetadata>> {
   return new Promise((resolve) => {
-    const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
-    const isAudioOnly = ['.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac'].includes(ext);
+    const ext = getFileExtension(file.name);
+    const isAudioOnly = AUDIO_EXTENSIONS.includes(ext) || (file.type ? file.type.startsWith('audio/') : false);
 
-    const url = URL.createObjectURL(file);
+    let url: string;
+    try {
+      url = URL.createObjectURL(file);
+    } catch {
+      resolve({
+        hasVideo: !isAudioOnly,
+        hasAudio: true,
+      });
+      return;
+    }
+
+    let isResolved = false;
+    let timer: any = null;
 
     if (isAudioOnly) {
       const audio = document.createElement('audio');
       audio.preload = 'metadata';
+
       const cleanup = () => {
+        if (timer) clearTimeout(timer);
         try {
           audio.pause();
           audio.removeAttribute('src');
@@ -121,30 +147,50 @@ export async function probeMediaElement(file: File): Promise<Partial<SourceMetad
         } catch {
           // ignore
         }
-        URL.revokeObjectURL(url);
+        try {
+          URL.revokeObjectURL(url);
+        } catch {
+          // ignore
+        }
       };
 
+      const finish = (meta: Partial<SourceMetadata>) => {
+        if (isResolved) return;
+        isResolved = true;
+        cleanup();
+        resolve(meta);
+      };
+
+      // Safeguard against stalled metadata on non-browser native audio formats
+      timer = setTimeout(() => {
+        finish({
+          hasAudio: true,
+          hasVideo: false,
+        });
+      }, 1200);
+
       audio.onloadedmetadata = () => {
-        const duration = audio.duration;
-        cleanup();
-        resolve({
-          duration,
+        finish({
+          duration: audio.duration,
           hasAudio: true,
           hasVideo: false,
         });
       };
+
       audio.onerror = () => {
-        cleanup();
-        resolve({
+        finish({
           hasAudio: true,
           hasVideo: false,
         });
       };
+
       audio.src = url;
     } else {
       const video = document.createElement('video');
       video.preload = 'metadata';
+
       const cleanup = () => {
+        if (timer) clearTimeout(timer);
         try {
           video.pause();
           video.removeAttribute('src');
@@ -152,30 +198,45 @@ export async function probeMediaElement(file: File): Promise<Partial<SourceMetad
         } catch {
           // ignore
         }
-        URL.revokeObjectURL(url);
+        try {
+          URL.revokeObjectURL(url);
+        } catch {
+          // ignore
+        }
       };
 
-      video.onloadedmetadata = () => {
-        const duration = video.duration;
-        const width = video.videoWidth;
-        const height = video.videoHeight;
-        const hasVideo = video.videoWidth > 0;
+      const finish = (meta: Partial<SourceMetadata>) => {
+        if (isResolved) return;
+        isResolved = true;
         cleanup();
-        resolve({
-          duration,
-          width,
-          height,
-          hasVideo,
-          hasAudio: true, // usually video containers have audio unless silent
+        resolve(meta);
+      };
+
+      // Safeguard against stalled metadata on non-browser native containers (e.g. MKV, AVI, FLV, WMV, VOB, TS)
+      timer = setTimeout(() => {
+        finish({
+          hasVideo: true,
+          hasAudio: true,
+        });
+      }, 1200);
+
+      video.onloadedmetadata = () => {
+        finish({
+          duration: video.duration,
+          width: video.videoWidth,
+          height: video.videoHeight,
+          hasVideo: video.videoWidth > 0,
+          hasAudio: true,
         });
       };
+
       video.onerror = () => {
-        cleanup();
-        resolve({
+        finish({
           hasVideo: true,
           hasAudio: true,
         });
       };
+
       video.src = url;
     }
   });
