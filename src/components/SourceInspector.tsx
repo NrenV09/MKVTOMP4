@@ -88,11 +88,11 @@ export const SourceInspector: React.FC<SourceInspectorProps> = ({
         {!disabled && (
           <button
             onClick={onClear}
-            className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-700/60 transition-colors text-xs font-semibold"
-            title="Eject / load another file"
+            className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-700/60 transition-colors text-xs font-medium"
+            title="Load another file"
           >
             <X className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">EJECT</span>
+            <span className="hidden sm:inline">Remove</span>
           </button>
         )}
       </div>
@@ -103,13 +103,13 @@ export const SourceInspector: React.FC<SourceInspectorProps> = ({
         <div className="bg-zinc-950/70 border border-zinc-800/80 rounded-lg p-2.5">
           <div className="text-[10px] text-zinc-500 uppercase tracking-wider flex items-center gap-1 mb-1">
             <Film className="w-3 h-3 text-emerald-400" />
-            VIDEO STREAM
+            Video Stream
           </div>
           <div className="text-zinc-200 font-semibold text-[13px] truncate">
             {source.hasVideo ? (
-              source.videoCodec ? source.videoCodec.toUpperCase() : 'DETECTED'
+              source.videoCodec ? source.videoCodec.toUpperCase() : 'Detected'
             ) : (
-              <span className="text-zinc-600">NONE (AUDIO ONLY)</span>
+              <span className="text-zinc-600">None (Audio only)</span>
             )}
           </div>
           <div className="text-[11px] text-zinc-400 mt-0.5 truncate">
@@ -122,13 +122,13 @@ export const SourceInspector: React.FC<SourceInspectorProps> = ({
         <div className="bg-zinc-950/70 border border-zinc-800/80 rounded-lg p-2.5">
           <div className="text-[10px] text-zinc-500 uppercase tracking-wider flex items-center gap-1 mb-1">
             <Volume2 className="w-3 h-3 text-blue-400" />
-            AUDIO STREAM
+            Audio Stream
           </div>
           <div className="text-zinc-200 font-semibold text-[13px] truncate">
             {source.hasAudio ? (
-              source.audioCodec ? source.audioCodec.toUpperCase() : 'DETECTED'
+              source.audioCodec ? source.audioCodec.toUpperCase() : 'Detected'
             ) : (
-              <span className="text-zinc-600">MUTED / NO AUDIO</span>
+              <span className="text-zinc-600">Muted / None</span>
             )}
           </div>
           <div className="text-[11px] text-zinc-400 mt-0.5 truncate">
@@ -140,20 +140,20 @@ export const SourceInspector: React.FC<SourceInspectorProps> = ({
         {/* Container / Duration */}
         <div className="bg-zinc-950/70 border border-zinc-800/80 rounded-lg p-2.5">
           <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1">
-            CONTAINER DURATION
+            Duration
           </div>
           <div className="text-zinc-200 font-semibold text-[13px]">
             {formatDuration(source.duration)}
           </div>
           <div className="text-[11px] text-zinc-400 mt-0.5">
-            {source.duration ? `${Math.round(source.duration)} total sec` : 'Header verified'}
+            {source.duration ? `${Math.round(source.duration)}s` : 'Verified'}
           </div>
         </div>
 
         {/* Bitrate / Density */}
         <div className="bg-zinc-950/70 border border-zinc-800/80 rounded-lg p-2.5">
           <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1">
-            BITRATE & SIZE
+            Bitrate
           </div>
           <div className="text-zinc-200 font-semibold text-[13px]">
             {source.bitrate ? `${source.bitrate} kbps` : (

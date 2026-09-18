@@ -1,6 +1,6 @@
 import React from 'react';
-import { Cpu, Terminal, HardDrive, Sun, Trash2, Zap } from 'lucide-react';
-import { detectDeviceCapabilities } from '../utils/ffmpegBuilder';
+import { Terminal, Trash2, Cpu, Zap } from 'lucide-react';
+import { HardwareCapabilities } from '../utils/hardwareEngine';
 
 interface HeaderProps {
   engineReady: boolean;
@@ -10,95 +10,76 @@ interface HeaderProps {
   toggleTerminal: () => void;
   logCount: number;
   wakeLockActive?: boolean;
+  hardwareCaps?: HardwareCapabilities | null;
   onPurgeCache?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   engineReady,
   engineLoading,
-  engineMode = 'st',
   terminalOpen,
   toggleTerminal,
   logCount,
-  wakeLockActive = false,
+  hardwareCaps,
   onPurgeCache,
 }) => {
-  const dev = detectDeviceCapabilities();
-
   return (
-    <header className="border-b border-zinc-800 bg-[#0c0c0e] px-3 sm:px-4 py-2.5 flex items-center justify-between text-xs select-none sticky top-0 z-30">
-      {/* Left: Branding */}
-      <div className="flex items-center gap-2 sm:gap-3">
-        <div className="w-7 h-7 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-mono font-bold text-xs shrink-0 shadow-sm">
-          FF
+    <header className="border-b border-zinc-800 bg-[#0c0c0e] px-4 py-3 flex items-center justify-between text-xs select-none sticky top-0 z-30">
+      {/* Left: Title & Engine Status */}
+      <div className="flex items-center gap-3">
+        <div className="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-mono font-bold text-xs shrink-0">
+          MP4
         </div>
         <div>
-          <div className="flex items-center gap-2">
-            <span className="font-semibold text-zinc-100 tracking-tight text-sm">
-              MKV to MP4 Converter
+          <h1 className="font-semibold text-zinc-100 tracking-tight text-sm">
+            MKV to MP4 Converter
+          </h1>
+          <div className="text-[11px] text-zinc-500 flex items-center gap-1.5 mt-0.5">
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                engineReady ? 'bg-emerald-500' : engineLoading ? 'bg-amber-500 animate-pulse' : 'bg-zinc-600'
+              }`}
+            />
+            <span>{engineReady ? 'Engine Ready' : engineLoading ? 'Initializing...' : 'Offline'}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Middle: WebGPU & Hardware Acceleration Status */}
+      {hardwareCaps && (
+        <div className="hidden md:flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-zinc-950/80 border border-zinc-800/80 font-mono text-[11px]">
+          <div className="flex items-center gap-1.5">
+            <Cpu className={`w-3.5 h-3.5 ${hardwareCaps.webgpu.available ? 'text-emerald-400' : 'text-zinc-500'}`} />
+            <span className="text-zinc-400">WebGPU:</span>
+            <span className={hardwareCaps.webgpu.available ? 'text-emerald-300 font-semibold' : 'text-zinc-500'}>
+              {hardwareCaps.webgpu.available
+                ? hardwareCaps.webgpu.adapterName.replace('Apple ', '').replace(' Corporation', '') || 'Active'
+                : 'Inactive'}
             </span>
-            {dev.isApple && (
-              <span className="hidden md:inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 font-medium">
-                <Zap className="w-2.5 h-2.5" />
-                {dev.chipLabel}
-              </span>
-            )}
           </div>
-          <div className="text-[11px] text-zinc-500 font-mono">
-            FFmpeg WebAssembly Core v0.12 • {engineMode === 'mt' ? 'Multi-Threaded' : 'Single-Thread'}
+          <span className="text-zinc-700">|</span>
+          <div className="flex items-center gap-1.5">
+            <Zap className="w-3.5 h-3.5 text-amber-400" />
+            <span className="text-zinc-400">Acceleration:</span>
+            <span className="text-amber-300 font-semibold">
+              {hardwareCaps.webcodecs.hwH264 || hardwareCaps.webcodecs.hwHEVC
+                ? 'Hardware Media Engine'
+                : 'Direct Stream Copy'}
+            </span>
           </div>
         </div>
-      </div>
-
-      {/* Middle: Telemetry */}
-      <div className="hidden lg:flex items-center gap-2">
-        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-zinc-900 border border-zinc-800 text-zinc-300 font-mono text-[11px]">
-          <Cpu className="w-3.5 h-3.5 text-emerald-400" />
-          <span className="text-zinc-400">HARDWARE CORES:</span>
-          <span className="text-emerald-400 font-semibold">{dev.cores}</span>
-        </div>
-
-        {/* Engine status */}
-        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-zinc-900 border border-zinc-800 text-zinc-300 font-mono text-[11px]">
-          <span
-            className={`w-2 h-2 rounded-full ${
-              engineReady
-                ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]'
-                : engineLoading
-                ? 'bg-amber-500 animate-pulse'
-                : 'bg-red-500'
-            }`}
-          />
-          <span className="text-zinc-400">ENGINE:</span>
-          <span className={engineReady ? 'text-emerald-400' : 'text-amber-400'}>
-            {engineReady ? (engineMode === 'mt' ? 'MULTI-CORE ONLINE' : 'ONLINE') : engineLoading ? 'INITIALIZING...' : 'OFFLINE'}
-          </span>
-        </div>
-
-        {wakeLockActive && (
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-amber-500/10 border border-amber-500/30 text-amber-300 font-mono text-[11px]">
-            <Sun className="w-3.5 h-3.5 text-amber-400" />
-            <span>WAKE LOCK</span>
-          </div>
-        )}
-
-        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-zinc-900 border border-zinc-800 text-zinc-400 font-mono text-[11px]">
-          <HardDrive className="w-3.5 h-3.5 text-purple-400" />
-          <span>STORAGE:</span>
-          <span className="text-zinc-200">MEMFS</span>
-        </div>
-      </div>
+      )}
 
       {/* Right: Actions */}
       <div className="flex items-center gap-2">
         {onPurgeCache && (
           <button
             onClick={onPurgeCache}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-mono transition-colors border bg-zinc-900 hover:bg-zinc-800 hover:text-red-300 border-zinc-800 text-zinc-400"
-            title="Purge media buffers, MEMFS files, and browser cache"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 border-zinc-800"
+            title="Reset converter"
           >
-            <Trash2 className="w-3.5 h-3.5 text-zinc-500 hover:text-red-400" />
-            <span className="hidden sm:inline">PURGE CACHE</span>
+            <Trash2 className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Reset</span>
           </button>
         )}
 
@@ -109,12 +90,12 @@ export const Header: React.FC<HeaderProps> = ({
               ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-400'
               : 'bg-zinc-900 hover:bg-zinc-800 border-zinc-800 text-zinc-300'
           }`}
-          title="Toggle FFmpeg telemetry terminal"
+          title="Toggle log console"
         >
           <Terminal className="w-3.5 h-3.5" />
-          <span>CONSOLE</span>
+          <span>Console</span>
           {logCount > 0 && (
-            <span className="px-1 py-0.2 rounded bg-zinc-800 text-zinc-400 text-[10px]">
+            <span className="px-1.5 py-0.2 rounded bg-zinc-800 text-zinc-400 text-[10px]">
               {logCount}
             </span>
           )}
@@ -123,3 +104,4 @@ export const Header: React.FC<HeaderProps> = ({
     </header>
   );
 };
+

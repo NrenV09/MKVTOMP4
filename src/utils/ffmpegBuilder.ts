@@ -230,6 +230,9 @@ export function buildFFmpegArgs(
   // Input file
   args.push('-i', inputFilename);
 
+  // Multi-threaded encoder
+  args.push('-threads', '0');
+
   // AUDIO ONLY EXTRACTION
   if (config.targetCategory === 'audio') {
     args.push('-vn'); // no video
@@ -353,7 +356,14 @@ export function buildFFmpegArgs(
   if (config.audioCodec === 'none') {
     args.push('-an');
   } else if (config.audioCodec === 'copy') {
-    args.push('-c:a', 'copy');
+    const srcAudio = (source?.audioCodec || '').toLowerCase();
+    const isMp4SafeAudio = ['aac', 'alac', 'mp3'].some((a) => srcAudio.includes(a));
+    if (config.container === 'mp4' && srcAudio && !isMp4SafeAudio) {
+      // Safely encode audio to AAC so stream copy of video doesn't fail due to incompatible audio container
+      args.push('-c:a', 'aac', '-b:a', '192k');
+    } else {
+      args.push('-c:a', 'copy');
+    }
   } else {
     args.push('-c:a', config.audioCodec);
 

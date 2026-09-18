@@ -38,6 +38,11 @@ import {
   detectDeviceCapabilities
 } from './utils/ffmpegBuilder';
 import { parseFFmpegProbeLogs, probeMediaElement, AUDIO_EXTENSIONS, getFileExtension } from './utils/probe';
+import { 
+  detectHardwareCapabilities, 
+  transcodeWithHardwareWebCodecs, 
+  HardwareCapabilities 
+} from './utils/hardwareEngine';
 
 import { Header } from './components/Header';
 import { MediaDropzone } from './components/MediaDropzone';
@@ -63,6 +68,8 @@ const DEFAULT_CONFIG: EncodingConfig = {
   audioChannels: 'source',
   audioSampleRate: 'source',
   fastStart: true,
+  hardwareAcceleration: true,
+  hardwareEngine: 'auto',
 };
 
 export default function App() {
@@ -74,6 +81,9 @@ export default function App() {
   const [rawFile, setRawFile] = useState<File | null>(null);
   const [sourceMeta, setSourceMeta] = useState<SourceMetadata | null>(null);
   const [isProbing, setIsProbing] = useState(false);
+
+  const [hardwareCaps, setHardwareCaps] = useState<HardwareCapabilities | null>(null);
+  const hwAbortController = useRef<AbortController | null>(null);
 
   const [config, setConfig] = useState<EncodingConfig>(DEFAULT_CONFIG);
   const [isConverting, setIsConverting] = useState(false);
@@ -98,10 +108,15 @@ export default function App() {
 
   const ffmpegRef = useRef<FFmpeg | null>(null);
   const startTimeRef = useRef<number>(0);
+  const sourceMetaRef = useRef<SourceMetadata | null>(null);
   const probeLogsBuffer = useRef<string[]>([]);
   const activeVirtualFiles = useRef<{ inName?: string; outName?: string }>({});
   const activeOutputUrlRef = useRef<string | null>(null);
   const wakeLockSentinelRef = useRef<any>(null);
+
+  useEffect(() => {
+    sourceMetaRef.current = sourceMeta;
+  }, [sourceMeta]);
 
   const addLog = useCallback((type: 'stdout' | 'stderr' | 'system' | 'error', text: string) => {
     const time = new Date().toTimeString().split(' ')[0] + '.' + String(new Date().getMilliseconds()).padStart(3, '0');
@@ -115,6 +130,22 @@ export default function App() {
       },
     ]);
   }, []);
+
+  // Hardware capabilities detection (WebGPU & WebCodecs)
+  useEffect(() => {
+    detectHardwareCapabilities().then((caps) => {
+      setHardwareCaps(caps);
+      if (caps.webgpu.available) {
+        addLog('system', `WebGPU hardware adapter initialized: ${caps.webgpu.description || caps.webgpu.adapterName}`);
+      }
+      if (caps.webcodecs.available) {
+        addLog(
+          'system',
+          `WebCodecs GPU media engine ready (H.264: ${caps.webcodecs.hwH264 ? 'Hardware' : 'No'}, HEVC: ${caps.webcodecs.hwHEVC ? 'Hardware' : 'No'})`
+        );
+      }
+    });
+  }, [addLog]);
 
   // Safely revoke object URLs to prevent browser/WebKit disk cache & System Data growth
   const revokeActiveUrl = useCallback(() => {
@@ -189,7 +220,7 @@ export default function App() {
         }
 
         // Live speed / frame parsing from ffmpeg stderr
-        if (message.includes('frame=') && message.includes('fps=')) {
+        if (message.includes('frame=') || message.includes('fps=') || message.includes('size=')) {
           const fpsMatch = message.match(/fps=\s*([\d.]+)/);
           const speedMatch = message.match(/speed=\s*([\d.x]+)/);
           const timeMatch = message.match(/time=\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/);
@@ -204,11 +235,28 @@ export default function App() {
                 curTime = h * 3600 + m * 60 + s;
               }
 
+              const dur = sourceMetaRef.current?.duration || prev.duration || 0;
+              let calcPercent = prev.percent;
+              let eta = prev.etaSeconds;
+
+              if (dur > 0 && curTime > 0) {
+                calcPercent = Math.min(99.5, Math.max(prev.percent, (curTime / dur) * 100));
+                if (speedMatch) {
+                  const spNum = parseFloat(speedMatch[1].replace('x', ''));
+                  if (spNum > 0 && dur > curTime) {
+                    eta = Math.max(0, Math.round((dur - curTime) / spNum));
+                  }
+                }
+              }
+
               return {
                 ...prev,
+                duration: dur > 0 ? dur : prev.duration,
                 fps: fpsMatch ? Math.round(parseFloat(fpsMatch[1])) : prev.fps,
                 speed: speedMatch ? speedMatch[1] : prev.speed,
                 currentTime: curTime,
+                percent: calcPercent,
+                etaSeconds: eta,
               };
             });
           }
@@ -219,21 +267,28 @@ export default function App() {
         const rawPercent = progress > 1 ? progress : progress * 100;
         const now = Date.now();
         const elapsed = now - startTimeRef.current;
+        const curSec = time > 0 ? time / 1000000 : 0;
 
         setTelemetry((prev) => {
-          const newPercent = Math.min(99.9, Math.max(prev.percent, rawPercent));
-          let eta: number | null = null;
+          const dur = sourceMetaRef.current?.duration || prev.duration || 0;
+          let newPercent = Math.max(prev.percent, rawPercent > 0 ? Math.min(99.5, rawPercent) : 0);
+          if (dur > 0 && curSec > 0) {
+            newPercent = Math.min(99.5, Math.max(newPercent, (curSec / dur) * 100));
+          }
+
+          let eta = prev.etaSeconds;
           if (newPercent > 2 && elapsed > 1000) {
-            const totalEst = (elapsed / (newPercent / 100));
+            const totalEst = elapsed / (newPercent / 100);
             eta = Math.max(0, Math.round((totalEst - elapsed) / 1000));
           }
 
           return {
             ...prev,
+            duration: dur > 0 ? dur : prev.duration,
             percent: newPercent,
             elapsedMs: elapsed,
             etaSeconds: eta,
-            currentTime: time ? time / 1000000 : prev.currentTime,
+            currentTime: curSec > 0 ? curSec : prev.currentTime,
           };
         });
       });
@@ -394,18 +449,22 @@ export default function App() {
               ...prev,
               videoCodec: 'copy',
               audioCodec: (parsed.audioCodec || '').toLowerCase().includes('aac') ? 'copy' : 'aac',
+              hardwareAcceleration: true,
+              hardwareEngine: 'stream-copy',
             }));
-            addLog('system', `⚡ Native ${parsed.videoCodec} stream confirmed: M3 Lossless Remux enabled (~60x-150x speed, 0% CPU degradation).`);
+            addLog('system', `Native ${parsed.videoCodec} stream confirmed. Direct hardware stream copy enabled.`);
           } else {
             // Source requires transcoding (e.g. WMV, VP8, VP9)
-            // Use M3 Turbo (ultrafast) so it does not take hours!
+            // Use WebGPU / WebCodecs hardware acceleration with ultrafast fallback
             setConfig((prev) => ({
               ...prev,
               videoCodec: 'libx264',
               audioCodec: 'aac',
               speedPreset: 'ultrafast',
+              hardwareAcceleration: true,
+              hardwareEngine: 'webgpu',
             }));
-            addLog('system', `Source codec ${parsed.videoCodec || 'unknown'} requires transcoding. Configured M3 Turbo (ultrafast multi-core) profile.`);
+            addLog('system', `Source codec ${parsed.videoCodec || 'unknown'} requires re-encoding. WebGPU & WebCodecs hardware acceleration configured.`);
           }
         }
 
@@ -494,23 +553,139 @@ export default function App() {
     try {
       const ffmpeg = ffmpegRef.current;
 
+      // Pipeline selection:
+      const isCopy = config.videoCodec === 'copy';
+      const isTargetMp4 = config.container === 'mp4';
+      const canHardwareWebCodecs =
+        !isCopy &&
+        config.hardwareAcceleration !== false &&
+        isTargetMp4 &&
+        (hardwareCaps?.webcodecs.hwH264 || hardwareCaps?.webcodecs.available);
+
+      let outputBlob: Blob | null = null;
+      let executedCommand: string[] = [];
+
       // 1. Write file into WebAssembly MEMFS
       await ffmpeg.writeFile(virtualIn, await fetchFile(rawFile));
 
-      // 2. Build parameter vector
-      const args = buildFFmpegArgs(virtualIn, virtualOut, config, sourceMeta);
-      addLog('system', `Executing: ffmpeg ${args.join(' ')}`);
+      if (isCopy) {
+        // DIRECT STREAM COPY (Instant passthrough)
+        setTelemetry((prev) => ({
+          ...prev,
+          accelerationMode: 'Direct Stream Copy (Instant 100x)',
+        }));
+        addLog('system', 'Direct stream copy enabled. Zero re-encoding passthrough pipeline.');
+        executedCommand = buildFFmpegArgs(virtualIn, virtualOut, config, sourceMeta);
+        addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
 
-      // 3. Execute FFmpeg command
-      const returnCode = await ffmpeg.exec(args);
+        const returnCode = await ffmpeg.exec(executedCommand);
+        if (returnCode !== 0) {
+          throw new Error(
+            `Direct stream copy exited with code ${returnCode}. Source stream is incompatible with .${config.container}. Try selecting WebGPU Hardware Re-encode.`
+          );
+        }
 
-      if (returnCode !== 0) {
-        throw new Error(
-          `FFmpeg conversion returned exit code ${returnCode}. ` +
-          (config.videoCodec === 'copy' || config.audioCodec === 'copy'
-            ? 'Stream copy failed because source codecs are incompatible with target container. Try switching to re-encode (H.264/AAC).'
-            : 'Check console telemetry for detailed codec diagnostics.')
-        );
+        const outputData = await ffmpeg.readFile(virtualOut);
+        const mimeType = getMimeType(config.container);
+        outputBlob = new Blob([(outputData as Uint8Array).buffer], { type: mimeType });
+      } else if (canHardwareWebCodecs) {
+        // WEBGPU & WEBCODECS HARDWARE ACCELERATION
+        setTelemetry((prev) => ({
+          ...prev,
+          accelerationMode: 'WebGPU & VideoToolbox Hardware Engine',
+        }));
+        addLog('system', 'Initializing WebCodecs & WebGPU hardware video pipeline...');
+
+        let sourceBlobForHw: Blob = rawFile;
+        // If file is MKV or similar, do a high-speed stream remux to MP4 in memory so browser media decoder can ingest it
+        if (extIn.toLowerCase() === '.mkv' || extIn.toLowerCase() === '.avi') {
+          addLog('system', 'Pre-flight stream remuxing for hardware video decoder...');
+          const tempRemuxOut = `temp_hw_remux_${Date.now()}.mp4`;
+          const remuxArgs = ['-threads', '0', '-i', virtualIn, '-c:v', 'copy', '-c:a', 'copy', '-tag:v', 'hvc1', '-movflags', '+faststart', tempRemuxOut];
+          const remuxCode = await ffmpeg.exec(remuxArgs);
+          if (remuxCode === 0) {
+            const remuxData = await ffmpeg.readFile(tempRemuxOut);
+            sourceBlobForHw = new Blob([(remuxData as Uint8Array).buffer], { type: 'video/mp4' });
+            try { await ffmpeg.deleteFile(tempRemuxOut); } catch {}
+          }
+        }
+
+        try {
+          hwAbortController.current = new AbortController();
+          let targetWidth: number | undefined;
+          let targetHeight: number | undefined;
+          if (config.resolution !== 'source') {
+            const [w, h] = config.resolution.split('x').map(Number);
+            targetWidth = w;
+            targetHeight = h;
+          }
+          let bitrateBps: number | undefined;
+          if (config.videoBitrate) {
+            bitrateBps = parseInt(config.videoBitrate, 10) * 1000;
+          }
+
+          outputBlob = await transcodeWithHardwareWebCodecs(sourceBlobForHw, {
+            targetWidth,
+            targetHeight,
+            bitrate: bitrateBps,
+            framerate: config.framerate !== 'source' ? Number(config.framerate) : undefined,
+            webgpuFilter: config.webgpuFilter,
+            signal: hwAbortController.current.signal,
+            onProgress: (p) => {
+              const now = Date.now();
+              const elapsed = now - startTimeRef.current;
+              const remainingSec = p.percent > 1 ? ((elapsed / (p.percent / 100)) - elapsed) / 1000 : null;
+              setTelemetry({
+                percent: p.percent,
+                currentTime: p.currentTime,
+                duration: p.duration,
+                fps: p.fps,
+                speed: `${p.fps} fps (Hardware)`,
+                elapsedMs: elapsed,
+                etaSeconds: remainingSec !== null ? Math.max(0, Math.round(remainingSec)) : null,
+                accelerationMode: 'WebGPU & VideoToolbox Hardware Engine',
+              });
+            },
+          });
+          executedCommand = [
+            'webcodecs',
+            '--hardware-acceleration=prefer-hardware',
+            `--width=${targetWidth || 'source'}`,
+            `--bitrate=${bitrateBps || 'auto'}`
+          ];
+          addLog('system', 'Hardware WebCodecs encode completed via GPU media engine.');
+        } catch (hwErr: any) {
+          if (hwAbortController.current?.signal.aborted) {
+            throw hwErr;
+          }
+          addLog('system', `Hardware encoder fallback (${hwErr?.message || 'hardware unavailable'}). Switching to multi-threaded CPU software.`);
+          executedCommand = buildFFmpegArgs(virtualIn, virtualOut, config, sourceMeta);
+          addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
+          const returnCode = await ffmpeg.exec(executedCommand);
+          if (returnCode !== 0) {
+            throw new Error(`FFmpeg conversion returned exit code ${returnCode}.`);
+          }
+          const outputData = await ffmpeg.readFile(virtualOut);
+          const mimeType = getMimeType(config.container);
+          outputBlob = new Blob([(outputData as Uint8Array).buffer], { type: mimeType });
+        }
+      } else {
+        // MULTI-THREADED CPU WASM
+        setTelemetry((prev) => ({
+          ...prev,
+          accelerationMode: 'Multi-threaded CPU Wasm',
+        }));
+        executedCommand = buildFFmpegArgs(virtualIn, virtualOut, config, sourceMeta);
+        addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
+        const returnCode = await ffmpeg.exec(executedCommand);
+        if (returnCode !== 0) {
+          throw new Error(
+            `FFmpeg conversion returned exit code ${returnCode}. Check console telemetry for detailed codec diagnostics.`
+          );
+        }
+        const outputData = await ffmpeg.readFile(virtualOut);
+        const mimeType = getMimeType(config.container);
+        outputBlob = new Blob([(outputData as Uint8Array).buffer], { type: mimeType });
       }
 
       // Unlink input file immediately to free virtual memory before loading output
@@ -521,12 +696,12 @@ export default function App() {
         // ignore
       }
 
+      if (!outputBlob) {
+        throw new Error('No output media blob generated.');
+      }
+
       // 5. Read generated output from virtual filesystem
-      addLog('system', `Reading output file ${virtualOut} from MEMFS...`);
-      const outputData = await ffmpeg.readFile(virtualOut);
-      const mimeType = getMimeType(config.container);
-      const blob = new Blob([(outputData as Uint8Array).buffer], { type: mimeType });
-      const outputUrl = URL.createObjectURL(blob);
+      const outputUrl = URL.createObjectURL(outputBlob);
       activeOutputUrlRef.current = outputUrl;
       setIsPurged(false);
 
@@ -536,13 +711,13 @@ export default function App() {
 
       setResult({
         outputUrl,
-        blob,
+        blob: outputBlob,
         outputName: finalOutputName,
-        outputSize: blob.size,
+        outputSize: outputBlob.size,
         durationSeconds: sourceMeta.duration,
         container: config.container,
         elapsedMs: elapsed,
-        command: args,
+        command: executedCommand,
       });
 
       addLog('system', `Conversion finished successfully in ${(elapsed / 1000).toFixed(1)}s.`);
@@ -576,7 +751,13 @@ export default function App() {
 
   // Abort ongoing job
   const handleAbort = async () => {
-    addLog('error', 'User aborted conversion process. Terminating WebAssembly worker...');
+    addLog('error', 'User aborted conversion process. Terminating workers...');
+    if (hwAbortController.current) {
+      try {
+        hwAbortController.current.abort();
+      } catch {}
+      hwAbortController.current = null;
+    }
     if (wakeLockSentinelRef.current) {
       try {
         await wakeLockSentinelRef.current.release();
@@ -619,6 +800,7 @@ export default function App() {
         toggleTerminal={() => setTerminalOpen(!terminalOpen)}
         logCount={logs.length}
         wakeLockActive={wakeLockActive}
+        hardwareCaps={hardwareCaps}
         onPurgeCache={purgeAllCaches}
       />
 
@@ -708,6 +890,7 @@ export default function App() {
                   onChange={setConfig}
                   source={sourceMeta}
                   disabled={isConverting}
+                  hardwareCaps={hardwareCaps}
                 />
 
                 {/* Primary Action Button & Summary */}
@@ -718,15 +901,19 @@ export default function App() {
                     </div>
                     <div>
                       <div className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
-                        <span>Ready to convert to</span>
+                        <span>Target format</span>
                         <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono text-xs uppercase font-bold">
                           .{config.container}
                         </span>
                       </div>
                       <div className="text-xs text-zinc-400 font-mono mt-0.5">
                         {config.videoCodec === 'copy' && config.audioCodec === 'copy'
-                          ? '⚡ Instant Stream Pass-Through (Lossless, 0% quality loss)'
-                          : `${config.videoCodec} • ${config.audioCodec} • Local WebAssembly`}
+                          ? '⚡ Direct stream copy (lossless passthrough • 100x speed)'
+                          : config.videoCodec === 'copy'
+                          ? '⚡ Video passthrough (stream copy) • Audio transcode'
+                          : config.hardwareAcceleration !== false && (hardwareCaps?.webcodecs.hwH264 || hardwareCaps?.webcodecs.available)
+                          ? '⚡ WebGPU & VideoToolbox Hardware Acceleration (60+ fps)'
+                          : `CPU multi-core transcode (${config.speedPreset})`}
                       </div>
                     </div>
                   </div>
@@ -736,12 +923,7 @@ export default function App() {
                     disabled={!engineReady || isConverting}
                     className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-zinc-950 font-sans font-bold text-sm tracking-wide transition-all shadow-lg shadow-emerald-500/25 flex items-center justify-center gap-2.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed hover:scale-[1.02] active:scale-[0.98]"
                   >
-                    <Zap className="w-4 h-4 fill-current" />
-                    <span>
-                      {config.videoCodec === 'copy' && config.audioCodec === 'copy'
-                        ? `CONVERT TO .${config.container.toUpperCase()} (FAST REMUX)`
-                        : `CONVERT TO .${config.container.toUpperCase()} NOW`}
-                    </span>
+                    <span>Convert to .{config.container.toUpperCase()}</span>
                   </button>
                 </div>
 

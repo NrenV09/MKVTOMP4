@@ -13,7 +13,8 @@ import {
   Music,
   Check,
   Flame,
-  ArrowRight
+  ArrowRight,
+  Cpu
 } from 'lucide-react';
 import { 
   EncodingConfig, 
@@ -29,12 +30,14 @@ import {
   ChannelLayout
 } from '../types';
 import { checkCompatibility, detectDeviceCapabilities } from '../utils/ffmpegBuilder';
+import { HardwareCapabilities } from '../utils/hardwareEngine';
 
 interface EncodingControlsProps {
   config: EncodingConfig;
   onChange: (newConfig: EncodingConfig) => void;
   source: SourceMetadata | null;
   disabled?: boolean;
+  hardwareCaps?: HardwareCapabilities | null;
 }
 
 export const EncodingControls: React.FC<EncodingControlsProps> = ({
@@ -42,6 +45,7 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
   onChange,
   source,
   disabled = false,
+  hardwareCaps,
 }) => {
   // Default to simple mode so casual users have a clean, friendly experience
   const [mode, setMode] = useState<'simple' | 'pro'>('simple');
@@ -57,22 +61,24 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
   // Quick Preset Actions
   const applyPreset = (presetName: string) => {
     if (presetName === 'remux') {
+      const srcAudio = (source?.audioCodec || '').toLowerCase();
+      const isMp4SafeAudio = ['aac', 'alac', 'mp3'].some((a) => srcAudio.includes(a));
       updateConfig({
         targetCategory: 'video',
         container: 'mp4',
         videoCodec: 'copy',
-        audioCodec: 'copy',
+        audioCodec: isMp4SafeAudio ? 'copy' : 'aac',
         resolution: 'source',
         framerate: 'source',
         fastStart: true,
       });
-    } else if (presetName === 'm3-turbo') {
+    } else if (presetName === 'fast' || presetName === 'm3-turbo') {
       updateConfig({
         targetCategory: 'video',
         container: 'mp4',
         videoCodec: 'libx264',
         rateControl: 'crf',
-        crf: 22,
+        crf: 23,
         resolution: 'source',
         framerate: 'source',
         speedPreset: 'ultrafast',
@@ -119,7 +125,7 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
         crf: 24,
         resolution: 'source',
         framerate: 'source',
-        speedPreset: 'fast',
+        speedPreset: 'ultrafast',
         audioCodec: 'aac',
         audioBitrate: '192k',
         fastStart: true,
@@ -133,7 +139,7 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
         crf: 24,
         resolution: '1280x720',
         framerate: 'source',
-        speedPreset: 'veryfast',
+        speedPreset: 'ultrafast',
         audioCodec: 'aac',
         audioBitrate: '128k',
         fastStart: true,
@@ -243,9 +249,22 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
               {/* Universal MP4 */}
               <button
-                onClick={() => applyPreset('web-h264')}
+                onClick={() => {
+                  const srcVid = (source?.videoCodec || '').toLowerCase();
+                  const canCopy = ['h264', 'avc1', 'hevc', 'h265', 'mpeg4', 'av1'].some((c) => srcVid.includes(c));
+                  const srcAudio = (source?.audioCodec || '').toLowerCase();
+                  const isMp4SafeAudio = ['aac', 'alac', 'mp3'].some((a) => srcAudio.includes(a));
+                  updateConfig({
+                    targetCategory: 'video',
+                    container: 'mp4',
+                    videoCodec: canCopy ? 'copy' : 'libx264',
+                    audioCodec: canCopy ? (isMp4SafeAudio ? 'copy' : 'aac') : 'aac',
+                    speedPreset: 'ultrafast',
+                    fastStart: true,
+                  });
+                }}
                 className={`p-3 rounded-xl border text-left transition-all flex flex-col justify-between ${
-                  config.targetCategory === 'video' && config.container === 'mp4' && config.videoCodec !== 'copy'
+                  config.targetCategory === 'video' && config.container === 'mp4'
                     ? 'bg-emerald-500/10 border-emerald-500/60 ring-1 ring-emerald-500/30 text-zinc-100'
                     : 'bg-zinc-950/60 border-zinc-800/80 hover:border-zinc-700 text-zinc-300'
                 }`}
@@ -255,46 +274,40 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                   <Film className="w-3.5 h-3.5 text-zinc-400" />
                 </div>
                 <div>
-                  <div className="text-xs font-medium text-zinc-200">Video (MP4)</div>
-                  <div className="text-[10px] text-zinc-500 mt-0.5">H.264 / AAC</div>
+                  <div className="text-xs font-medium text-zinc-200">MP4 Video</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">Universal format</div>
                 </div>
               </button>
 
-              {/* Fast Remux MP4 */}
+              {/* MOV Video */}
               <button
-                onClick={() => applyPreset('remux')}
+                onClick={() => {
+                  const srcVid = (source?.videoCodec || '').toLowerCase();
+                  const canCopy = ['h264', 'avc1', 'hevc', 'h265', 'prores', 'mpeg4'].some((c) => srcVid.includes(c));
+                  const srcAudio = (source?.audioCodec || '').toLowerCase();
+                  const isMovSafeAudio = ['aac', 'alac', 'pcm_s16le', 'mp3'].some((a) => srcAudio.includes(a));
+                  updateConfig({
+                    targetCategory: 'video',
+                    container: 'mov',
+                    videoCodec: canCopy ? 'copy' : 'libx264',
+                    audioCodec: canCopy ? (isMovSafeAudio ? 'copy' : 'aac') : 'aac',
+                    speedPreset: 'ultrafast',
+                    fastStart: true,
+                  });
+                }}
                 className={`p-3 rounded-xl border text-left transition-all flex flex-col justify-between ${
-                  config.targetCategory === 'video' && config.container === 'mp4' && config.videoCodec === 'copy'
+                  config.targetCategory === 'video' && config.container === 'mov'
                     ? 'bg-emerald-500/10 border-emerald-500/60 ring-1 ring-emerald-500/30 text-zinc-100'
                     : 'bg-zinc-950/60 border-zinc-800/80 hover:border-zinc-700 text-zinc-300'
                 }`}
               >
                 <div className="flex items-center justify-between w-full mb-1">
-                  <span className="font-mono font-bold text-sm text-amber-400">Remux</span>
-                  <Zap className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="font-mono font-bold text-sm text-amber-400">MOV</span>
+                  <Film className="w-3.5 h-3.5 text-amber-400" />
                 </div>
                 <div>
-                  <div className="text-xs font-medium text-zinc-200">Stream Copy</div>
-                  <div className="text-[10px] text-zinc-500 mt-0.5">Lossless pass-through</div>
-                </div>
-              </button>
-
-              {/* MP3 Audio */}
-              <button
-                onClick={() => applyPreset('audio-mp3')}
-                className={`p-3 rounded-xl border text-left transition-all flex flex-col justify-between ${
-                  config.targetCategory === 'audio' && config.container === 'mp3'
-                    ? 'bg-blue-500/10 border-blue-500/60 ring-1 ring-blue-500/30 text-zinc-100'
-                    : 'bg-zinc-950/60 border-zinc-800/80 hover:border-zinc-700 text-zinc-300'
-                }`}
-              >
-                <div className="flex items-center justify-between w-full mb-1">
-                  <span className="font-mono font-bold text-sm text-blue-400">MP3</span>
-                  <Music className="w-3.5 h-3.5 text-zinc-400" />
-                </div>
-                <div>
-                  <div className="text-xs font-medium text-zinc-200">Audio (MP3)</div>
-                  <div className="text-[10px] text-zinc-500 mt-0.5">320 kbps CBR</div>
+                  <div className="text-xs font-medium text-zinc-200">QuickTime (MOV)</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">Apple ecosystem</div>
                 </div>
               </button>
 
@@ -314,6 +327,25 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                 <div>
                   <div className="text-xs font-medium text-zinc-200">Video (WebM)</div>
                   <div className="text-[10px] text-zinc-500 mt-0.5">VP9 / Opus</div>
+                </div>
+              </button>
+
+              {/* MP3 Audio */}
+              <button
+                onClick={() => applyPreset('audio-mp3')}
+                className={`p-3 rounded-xl border text-left transition-all flex flex-col justify-between ${
+                  config.targetCategory === 'audio' && config.container === 'mp3'
+                    ? 'bg-blue-500/10 border-blue-500/60 ring-1 ring-blue-500/30 text-zinc-100'
+                    : 'bg-zinc-950/60 border-zinc-800/80 hover:border-zinc-700 text-zinc-300'
+                }`}
+              >
+                <div className="flex items-center justify-between w-full mb-1">
+                  <span className="font-mono font-bold text-sm text-blue-400">MP3</span>
+                  <Music className="w-3.5 h-3.5 text-zinc-400" />
+                </div>
+                <div>
+                  <div className="text-xs font-medium text-zinc-200">Audio (MP3)</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">Extract audio</div>
                 </div>
               </button>
 
@@ -398,58 +430,163 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
             )}
           </div>
 
-          {/* Apple Silicon Hardware Status Banner */}
-          {dev.isApple && config.targetCategory === 'video' && (
-            <div className="p-3 rounded-xl bg-gradient-to-r from-emerald-950/40 via-zinc-900 to-zinc-950 border border-emerald-500/30 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs font-mono shadow-sm">
+          {/* Hardware Acceleration & WebGPU Access Controls */}
+          <div className="bg-zinc-950/80 border border-zinc-800/90 rounded-xl p-3.5 sm:p-4 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2.5 border-b border-zinc-800/60">
               <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/40 flex items-center justify-center text-emerald-400 shrink-0 shadow-[0_0_12px_rgba(16,185,129,0.2)]">
-                  <Zap className="w-4 h-4" />
+                <div className="w-7 h-7 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+                  <Cpu className="w-4 h-4" />
                 </div>
                 <div>
-                  <div className="text-zinc-100 font-semibold flex items-center gap-2">
-                    <span>{dev.chipLabel}</span>
-                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                      config.videoCodec === 'copy'
-                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                        : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                  <div className="text-xs font-mono font-semibold text-zinc-200 flex items-center gap-2">
+                    <span>Hardware Acceleration & WebGPU</span>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
+                      hardwareCaps?.webgpu.available
+                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                        : 'bg-zinc-800 text-zinc-400'
                     }`}>
-                      {config.videoCodec === 'copy' ? '⚡ 50x–150x Stream Remux' : '🚀 8-Core Wasm Transcode'}
+                      {hardwareCaps?.webgpu.available ? 'WebGPU Active' : 'Fallback Mode'}
                     </span>
                   </div>
-                  <div className="text-[11px] text-zinc-400 mt-0.5 max-w-xl">
-                    {config.videoCodec === 'copy' ? (
-                      <span className="text-emerald-300/90">
-                        Zero CPU re-encoding: Repackages native H.264/HEVC frames directly into MP4. 100% original quality at ~100x speed.
-                      </span>
-                    ) : (
-                      <span className="text-zinc-300">
-                        Active preset ({config.videoCodec}, {config.speedPreset}) re-encodes raw frames in browser Wasm. For instant conversion, switch to Stream Remux!
-                      </span>
-                    )}
+                  <div className="text-[11px] text-zinc-400 mt-0.5">
+                    {hardwareCaps?.webgpu.available
+                      ? `${hardwareCaps.webgpu.description || hardwareCaps.webgpu.adapterName} • Media Engine Ready`
+                      : 'WebCodecs & Multi-threaded Wasm Pipeline'}
                   </div>
                 </div>
               </div>
-              {config.videoCodec !== 'copy' && (
-                <button
-                  onClick={() => applyPreset('remux')}
-                  className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold text-xs shrink-0 transition-all flex items-center gap-1.5 shadow-md hover:scale-[1.02]"
-                >
-                  <Zap className="w-3.5 h-3.5 fill-current" />
-                  <span>Switch to Stream Remux</span>
-                </button>
-              )}
+
+              <div className="text-right font-mono text-[11px] text-zinc-400">
+                Mode:{' '}
+                <span className="text-emerald-400 font-semibold">
+                  {config.videoCodec === 'copy'
+                    ? 'Direct Stream Copy'
+                    : config.hardwareAcceleration !== false
+                    ? 'WebGPU / WebCodecs HW'
+                    : 'CPU Software'}
+                </span>
+              </div>
             </div>
-          )}
+
+            {/* Mode selection cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs font-mono">
+              {/* Option 1: Direct Stream Copy */}
+              <button
+                type="button"
+                onClick={() => {
+                  applyPreset('remux');
+                  updateConfig({ hardwareAcceleration: true, hardwareEngine: 'stream-copy' });
+                }}
+                className={`p-3 rounded-lg border text-left transition-all ${
+                  config.videoCodec === 'copy'
+                    ? 'bg-emerald-500/15 border-emerald-500/60 text-zinc-100 ring-1 ring-emerald-500/30 shadow-sm'
+                    : 'bg-zinc-900/60 border-zinc-800/80 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
+                }`}
+              >
+                <div className="font-semibold flex items-center justify-between">
+                  <span className="text-emerald-400 font-bold">1. Direct Stream Copy</span>
+                  {config.videoCodec === 'copy' && <Check className="w-3.5 h-3.5 text-emerald-400" />}
+                </div>
+                <div className="text-[11px] text-zinc-200 mt-1">Instant Passthrough (100x)</div>
+                <div className="text-[10px] text-zinc-500 mt-0.5">Zero CPU re-encoding • 100% original quality</div>
+              </button>
+
+              {/* Option 2: WebGPU & WebCodecs Hardware */}
+              <button
+                type="button"
+                onClick={() => {
+                  updateConfig({ 
+                    hardwareAcceleration: true, 
+                    hardwareEngine: 'webgpu', 
+                    videoCodec: 'libx264',
+                    speedPreset: 'ultrafast',
+                  });
+                }}
+                className={`p-3 rounded-lg border text-left transition-all ${
+                  config.videoCodec !== 'copy' && config.hardwareAcceleration !== false
+                    ? 'bg-amber-500/15 border-amber-500/60 text-zinc-100 ring-1 ring-amber-500/30 shadow-sm'
+                    : 'bg-zinc-900/60 border-zinc-800/80 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
+                }`}
+              >
+                <div className="font-semibold flex items-center justify-between">
+                  <span className="text-amber-400 font-bold">2. WebGPU & WebCodecs</span>
+                  {config.videoCodec !== 'copy' && config.hardwareAcceleration !== false && (
+                    <Check className="w-3.5 h-3.5 text-amber-400" />
+                  )}
+                </div>
+                <div className="text-[11px] text-zinc-200 mt-1">GPU Hardware Engine</div>
+                <div className="text-[10px] text-zinc-500 mt-0.5">Apple VideoToolbox / GPU acceleration</div>
+              </button>
+
+              {/* Option 3: Multi-core CPU software */}
+              <button
+                type="button"
+                onClick={() => {
+                  updateConfig({ 
+                    hardwareAcceleration: false, 
+                    hardwareEngine: 'cpu',
+                    videoCodec: 'libx264',
+                    speedPreset: 'ultrafast',
+                  });
+                }}
+                className={`p-3 rounded-lg border text-left transition-all ${
+                  config.videoCodec !== 'copy' && config.hardwareAcceleration === false
+                    ? 'bg-blue-500/15 border-blue-500/60 text-zinc-100 ring-1 ring-blue-500/30 shadow-sm'
+                    : 'bg-zinc-900/60 border-zinc-800/80 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
+                }`}
+              >
+                <div className="font-semibold flex items-center justify-between">
+                  <span className="text-zinc-300 font-bold">3. Multi-core CPU</span>
+                  {config.videoCodec !== 'copy' && config.hardwareAcceleration === false && (
+                    <Check className="w-3.5 h-3.5 text-blue-400" />
+                  )}
+                </div>
+                <div className="text-[11px] text-zinc-200 mt-1">x264 Wasm Fallback</div>
+                <div className="text-[10px] text-zinc-500 mt-0.5">Multi-threaded software transcoding</div>
+              </button>
+            </div>
+
+            {/* WebGPU Zero-Copy Filter Options */}
+            {config.hardwareAcceleration !== false && config.videoCodec !== 'copy' && hardwareCaps?.webgpu.available && (
+              <div className="mt-4 pt-3 border-t border-zinc-800/60">
+                <div className="text-xs font-mono font-semibold text-zinc-300 mb-2">WebGPU Compute Shader Filters</div>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => updateConfig({ webgpuFilter: 'none' })}
+                    className={`px-3 py-1.5 rounded-lg border text-xs font-mono font-medium transition-colors ${
+                      (!config.webgpuFilter || config.webgpuFilter === 'none')
+                        ? 'bg-zinc-800 border-zinc-600 text-zinc-200'
+                        : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-300'
+                    }`}
+                  >
+                    No Filter
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => updateConfig({ webgpuFilter: 'grayscale' })}
+                    className={`px-3 py-1.5 rounded-lg border text-xs font-mono font-medium transition-colors ${
+                      config.webgpuFilter === 'grayscale'
+                        ? 'bg-fuchsia-500/20 border-fuchsia-500 text-fuchsia-300'
+                        : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-300'
+                    }`}
+                  >
+                    Grayscale + Brightness
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
 
           {/* 2. Choose Quality Profile (For Video) */}
           {config.targetCategory === 'video' && config.container !== 'gif' && (
             <div>
               <label className="text-xs font-mono text-zinc-300 font-semibold uppercase tracking-wider block mb-2.5">
-                2. Quality & Speed Profile
+                2. Profile
               </label>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-2 font-mono text-xs">
-                {/* Remux (Fastest) */}
+                {/* Passthrough / Copy */}
                 <button
                   onClick={() => applyPreset('remux')}
                   className={`p-3 rounded-lg border text-left transition-all min-h-[52px] ${
@@ -459,16 +596,16 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                   }`}
                 >
                   <div className="font-semibold text-zinc-200 flex items-center justify-between">
-                    <span className="text-emerald-400 font-bold">⚡ Stream Remux</span>
+                    <span className="text-emerald-400 font-bold">Passthrough</span>
                     {config.videoCodec === 'copy' && <Check className="w-3.5 h-3.5 text-emerald-400" />}
                   </div>
-                  <div className="text-[11px] text-zinc-300 mt-1 font-semibold">50x–150x Speed</div>
-                  <div className="text-[10px] text-zinc-500 mt-0.5">0% quality loss</div>
+                  <div className="text-[11px] text-zinc-300 mt-1">Direct stream copy</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">Instant • Original quality</div>
                 </button>
 
-                {/* M3 Turbo Transcode */}
+                {/* Fast Transcode */}
                 <button
-                  onClick={() => applyPreset('m3-turbo')}
+                  onClick={() => applyPreset('fast')}
                   className={`p-3 rounded-lg border text-left transition-all min-h-[52px] ${
                     config.videoCodec === 'libx264' && config.speedPreset === 'ultrafast'
                       ? 'bg-emerald-500/10 border-emerald-500/60 ring-1 ring-emerald-500/30'
@@ -476,13 +613,13 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                   }`}
                 >
                   <div className="font-semibold text-zinc-200 flex items-center justify-between">
-                    <span className="text-amber-300 font-bold">🚀 M3 Turbo</span>
+                    <span>Fast</span>
                     {config.videoCodec === 'libx264' && config.speedPreset === 'ultrafast' && (
                       <Check className="w-3.5 h-3.5 text-emerald-400" />
                     )}
                   </div>
-                  <div className="text-[11px] text-zinc-300 mt-1">3x–6x Speed</div>
-                  <div className="text-[10px] text-zinc-500 mt-0.5">H.264 ultrafast</div>
+                  <div className="text-[11px] text-zinc-300 mt-1">H.264 ultrafast</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">Fastest re-encode</div>
                 </button>
 
                 {/* H.264 Balanced */}
@@ -495,13 +632,13 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                   }`}
                 >
                   <div className="font-semibold text-zinc-200 flex items-center justify-between">
-                    <span>H.264 Balanced</span>
+                    <span>Balanced</span>
                     {config.videoCodec === 'libx264' && config.crf === 23 && config.speedPreset === 'veryfast' && (
                       <Check className="w-3.5 h-3.5 text-emerald-400" />
                     )}
                   </div>
-                  <div className="text-[11px] text-zinc-400 mt-1">CRF 23 • veryfast</div>
-                  <div className="text-[10px] text-zinc-500 mt-0.5">Universal playback</div>
+                  <div className="text-[11px] text-zinc-400 mt-1">H.264 • CRF 23</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">Standard quality</div>
                 </button>
 
                 {/* High Quality */}
@@ -519,8 +656,8 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                       <Check className="w-3.5 h-3.5 text-emerald-400" />
                     )}
                   </div>
-                  <div className="text-[11px] text-zinc-400 mt-1">CRF 18 • fast</div>
-                  <div className="text-[10px] text-zinc-500 mt-0.5">Intensive compute</div>
+                  <div className="text-[11px] text-zinc-400 mt-1">H.264 • CRF 18</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">Maximum detail</div>
                 </button>
 
                 {/* HEVC / H.265 */}
@@ -533,13 +670,13 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                   }`}
                 >
                   <div className="font-semibold text-zinc-200 flex items-center justify-between">
-                    <span>HEVC / H.265</span>
+                    <span>HEVC</span>
                     {config.videoCodec === 'libx265' && (
                       <Check className="w-3.5 h-3.5 text-purple-400" />
                     )}
                   </div>
-                  <div className="text-[11px] text-zinc-400 mt-1">CRF 24 • libx265</div>
-                  <div className="text-[10px] text-zinc-500 mt-0.5">High efficiency</div>
+                  <div className="text-[11px] text-zinc-400 mt-1">H.265 • CRF 24</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">High compression</div>
                 </button>
 
                 {/* Compact 720p */}
@@ -552,13 +689,13 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                   }`}
                 >
                   <div className="font-semibold text-zinc-200 flex items-center justify-between">
-                    <span>720p Downscale</span>
+                    <span>720p</span>
                     {config.resolution === '1280x720' && (
                       <Check className="w-3.5 h-3.5 text-emerald-400" />
                     )}
                   </div>
-                  <div className="text-[11px] text-zinc-400 mt-1">1280×720 • CRF 24</div>
-                  <div className="text-[10px] text-zinc-500 mt-0.5">Reduced bitrate</div>
+                  <div className="text-[11px] text-zinc-400 mt-1">1280×720 downscale</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">Compact file size</div>
                 </button>
               </div>
             </div>
@@ -582,13 +719,13 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
           {/* Link to Open Pro Settings */}
           <div className="pt-2 border-t border-zinc-800/80 flex items-center justify-between">
             <span className="text-[11px] text-zinc-500 font-mono">
-              Need custom CRF, custom bitrate, 4K downscaling, or 5.1 surround downmix?
+              Advanced parameters (CRF, custom bitrate, resolution, audio channels)
             </span>
             <button
               onClick={() => setMode('pro')}
-              className="text-xs font-mono text-emerald-400 hover:text-emerald-300 flex items-center gap-1 transition-colors font-semibold"
+              className="text-xs font-mono text-emerald-400 hover:text-emerald-300 flex items-center gap-1 transition-colors font-medium"
             >
-              <span>Customize Pro Parameters</span>
+              <span>Advanced Settings</span>
               <ArrowRight className="w-3.5 h-3.5" />
             </button>
           </div>
@@ -620,7 +757,7 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                   }`}
                 >
                   <Film className="w-3.5 h-3.5" />
-                  <span>VIDEO CONVERSION</span>
+                  <span>VIDEO</span>
                 </button>
                 <button
                   onClick={() => {
@@ -637,7 +774,7 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                   }`}
                 >
                   <Volume2 className="w-3.5 h-3.5" />
-                  <span>AUDIO EXTRACTION</span>
+                  <span>AUDIO</span>
                 </button>
               </div>
 
@@ -649,13 +786,13 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                 <button
                   onClick={() => applyPreset('remux')}
                   className={`px-2 py-1 rounded text-[11px] font-mono border transition-colors ${
-                    config.videoCodec === 'copy' && config.audioCodec === 'copy'
+                    config.videoCodec === 'copy'
                       ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-400'
                       : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
                   }`}
-                  title="Instant stream copy without re-encoding"
+                  title="Direct stream copy without re-encoding"
                 >
-                  ⚡ Remux
+                  Passthrough
                 </button>
                 <button
                   onClick={() => applyPreset('web-h264')}

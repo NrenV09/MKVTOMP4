@@ -90,6 +90,9 @@ export interface EncodingConfig {
   fastStart?: boolean;
   pixelFormat?: 'yuv420p' | 'yuv420p10le' | 'auto';
   hardwareThreads?: number;
+  hardwareAcceleration?: boolean;
+  hardwareEngine?: 'auto' | 'webgpu' | 'stream-copy' | 'cpu';
+  webgpuFilter?: 'none' | 'grayscale';
 }
 
 export interface ProgressTelemetry {
@@ -102,6 +105,7 @@ export interface ProgressTelemetry {
   etaSeconds: number | null;
   currentPass?: number;
   totalPasses?: number;
+  accelerationMode?: string;
 }
 
 export interface LogMessage {
