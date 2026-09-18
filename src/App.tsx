@@ -58,6 +58,8 @@ import { CommandPreview } from './components/CommandPreview';
 import { ProgressEngine } from './components/ProgressEngine';
 import { ResultPanel } from './components/ResultPanel';
 import { TerminalDock } from './components/TerminalDock';
+import { Footer } from './components/Footer';
+import { ComplianceModal, ComplianceTab } from './components/ComplianceModal';
 
 const DEFAULT_CONFIG: EncodingConfig = {
   targetCategory: 'video',
@@ -112,6 +114,13 @@ export default function App() {
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [wakeLockActive, setWakeLockActive] = useState(false);
   const [wasmCacheStats, setWasmCacheStats] = useState<WasmCacheStats | null>(null);
+  const [complianceOpen, setComplianceOpen] = useState(false);
+  const [complianceTab, setComplianceTab] = useState<ComplianceTab>('privacy');
+
+  const handleOpenCompliance = useCallback((tab: ComplianceTab = 'privacy') => {
+    setComplianceTab(tab);
+    setComplianceOpen(true);
+  }, []);
 
   const ffmpegRef = useRef<FFmpeg | null>(null);
   const startTimeRef = useRef<number>(0);
@@ -852,6 +861,7 @@ export default function App() {
         hardwareCaps={hardwareCaps}
         onPurgeCache={purgeAllCaches}
         wasmCacheStats={wasmCacheStats}
+        onOpenCompliance={handleOpenCompliance}
       />
 
       {/* Main Workstation Canvas */}
@@ -958,11 +968,11 @@ export default function App() {
                       </div>
                       <div className="text-xs text-zinc-400 font-mono mt-0.5">
                         {config.videoCodec === 'copy' && config.audioCodec === 'copy'
-                          ? '⚡ Direct stream copy (lossless passthrough • 100x speed)'
+                          ? '⚡ Direct stream copy (lossless passthrough • near-instant remuxing)'
                           : config.videoCodec === 'copy'
                           ? '⚡ Video passthrough (stream copy) • Audio transcode'
                           : config.hardwareAcceleration !== false && (hardwareCaps?.webcodecs.hwH264 || hardwareCaps?.webcodecs.available)
-                          ? '⚡ WebGPU & VideoToolbox Hardware Acceleration (60+ fps)'
+                          ? '⚡ Hardware-accelerated encoding via WebCodecs & GPU'
                           : `CPU multi-core transcode (${config.speedPreset})`}
                       </div>
                     </div>
@@ -971,7 +981,8 @@ export default function App() {
                   <button
                     onClick={handleStartConversion}
                     disabled={!engineReady || isConverting}
-                    className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-zinc-950 font-sans font-bold text-sm tracking-wide transition-all shadow-lg shadow-emerald-500/25 flex items-center justify-center gap-2.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed hover:scale-[1.02] active:scale-[0.98]"
+                    aria-label={`Convert media file to ${config.container.toUpperCase()} container`}
+                    className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-zinc-950 font-sans font-bold text-sm tracking-wide transition-all shadow-lg shadow-emerald-500/25 flex items-center justify-center gap-2.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed hover:scale-[1.02] active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
                   >
                     <span>Convert to .{config.container.toUpperCase()}</span>
                   </button>
@@ -984,12 +995,22 @@ export default function App() {
         )}
       </main>
 
+      {/* Compliance & Legal Footer */}
+      <Footer onOpenCompliance={handleOpenCompliance} />
+
       {/* Terminal Telemetry Dock */}
       <TerminalDock
         logs={logs}
         isOpen={terminalOpen}
         onClose={() => setTerminalOpen(false)}
         onClear={() => setLogs([])}
+      />
+
+      {/* Legal, Privacy & Compliance Transparency Modal */}
+      <ComplianceModal
+        isOpen={complianceOpen}
+        onClose={() => setComplianceOpen(false)}
+        defaultTab={complianceTab}
       />
     </div>
   );

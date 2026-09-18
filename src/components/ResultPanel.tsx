@@ -144,24 +144,26 @@ export const ResultPanel: React.FC<ResultPanelProps> = ({
             <>
               <button
                 onClick={handleDownload}
-                className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-sans font-semibold text-sm transition-all shadow-lg shadow-emerald-500/20"
+                aria-label={`Download converted file ${result.fileName}`}
+                className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-sans font-semibold text-sm transition-all shadow-lg shadow-emerald-500/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
               >
-                <Download className="w-4 h-4" />
-                <span>Download</span>
+                <Download className="w-4 h-4" aria-hidden="true" />
+                <span>Download File</span>
               </button>
 
               <button
                 onClick={handleExecutePurge}
-                className="flex items-center gap-1.5 px-3 py-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-red-300 border border-zinc-800 hover:border-red-900/50 transition-colors text-xs font-semibold"
+                aria-label="Free temporary RAM memory buffer immediately"
+                className="flex items-center gap-1.5 px-3 py-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-red-300 border border-zinc-800 hover:border-red-900/50 transition-colors text-xs font-semibold focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
                 title="Free memory buffer immediately"
               >
-                <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                <Trash2 className="w-3.5 h-3.5 text-red-400" aria-hidden="true" />
                 <span>Clear Memory</span>
               </button>
             </>
           ) : (
             <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300">
-              <ShieldCheck className="w-4 h-4 text-emerald-400" />
+              <ShieldCheck className="w-4 h-4 text-emerald-400" aria-hidden="true" />
               <span className="text-xs font-sans">Memory Cleared</span>
             </div>
           )}

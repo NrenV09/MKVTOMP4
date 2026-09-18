@@ -88,11 +88,12 @@ export const SourceInspector: React.FC<SourceInspectorProps> = ({
         {!disabled && (
           <button
             onClick={onClear}
-            className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-700/60 transition-colors text-xs font-medium"
-            title="Load another file"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-700/60 transition-colors text-xs font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+            title="Remove current file and choose another"
+            aria-label="Remove current media file and choose another"
           >
-            <X className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Remove</span>
+            <X className="w-3.5 h-3.5" aria-hidden="true" />
+            <span className="hidden sm:inline">Remove File</span>
           </button>
         )}
       </div>

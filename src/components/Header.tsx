@@ -1,7 +1,8 @@
 import React from 'react';
-import { Terminal, Trash2, Cpu, Zap, HardDrive } from 'lucide-react';
+import { Terminal, Trash2, Cpu, Zap, HardDrive, ShieldCheck } from 'lucide-react';
 import { HardwareCapabilities } from '../utils/hardwareEngine';
 import { WasmCacheStats } from '../utils/wasmCache';
+import { ComplianceTab } from './ComplianceModal';
 
 interface HeaderProps {
   engineReady: boolean;
@@ -14,6 +15,7 @@ interface HeaderProps {
   hardwareCaps?: HardwareCapabilities | null;
   onPurgeCache?: () => void;
   wasmCacheStats?: WasmCacheStats | null;
+  onOpenCompliance?: (tab: ComplianceTab) => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -26,6 +28,7 @@ export const Header: React.FC<HeaderProps> = ({
   hardwareCaps,
   onPurgeCache,
   wasmCacheStats,
+  onOpenCompliance,
 }) => {
   return (
     <header className="border-b border-zinc-800 bg-[#0c0c0e] px-4 py-3 flex items-center justify-between text-xs select-none sticky top-0 z-30">
@@ -99,11 +102,24 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         )}
 
+        {onOpenCompliance && (
+          <button
+            onClick={() => onOpenCompliance('privacy')}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-emerald-400 border-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+            title="Privacy, Terms, Cookies & Legal details"
+            aria-label="View Privacy, Terms, Cookies and Compliance details"
+          >
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="hidden sm:inline">Privacy & Legal</span>
+          </button>
+        )}
+
         {onPurgeCache && (
           <button
             onClick={onPurgeCache}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 border-zinc-800"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 border-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
             title="Reset active media buffers (WebAssembly engine stays safely cached)"
+            aria-label="Reset active media buffers"
           >
             <Trash2 className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">Reset</span>
@@ -112,12 +128,13 @@ export const Header: React.FC<HeaderProps> = ({
 
         <button
           onClick={toggleTerminal}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono transition-colors border ${
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono transition-colors border focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
             terminalOpen
               ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-400'
               : 'bg-zinc-900 hover:bg-zinc-800 border-zinc-800 text-zinc-300'
           }`}
           title="Toggle log console"
+          aria-label="Toggle telemetry log console"
         >
           <Terminal className="w-3.5 h-3.5" />
           <span>Console</span>
