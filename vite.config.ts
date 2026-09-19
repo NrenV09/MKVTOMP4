@@ -62,9 +62,10 @@ export default defineConfig(() => {
           globIgnores: ['**/ffmpeg/**', '**/*.wasm'],
           maximumFileSizeToCacheInBytes: 40 * 1024 * 1024,
           navigateFallback: 'index.html',
+          navigateFallbackDenylist: [/^\/(ffmpeg|7z|rar)\//, /\.(wasm|bin)$/i],
           runtimeCaching: [
             {
-              urlPattern: /\/ffmpeg\/.*\.(js|wasm)$/i,
+              urlPattern: /.*ffmpeg.*\.(js|wasm)$/i,
               handler: 'CacheFirst',
               options: {
                 cacheName: 'ffmpeg-wasm-runtime-cache',
@@ -78,10 +79,24 @@ export default defineConfig(() => {
               },
             },
             {
-              urlPattern: /\/(7z|rar)\/.*\.(wasm|js)$/i,
+              urlPattern: /.*(7z|rar).*\.(wasm|js)$/i,
               handler: 'CacheFirst',
               options: {
                 cacheName: 'archive-wasm-runtime-cache',
+                expiration: {
+                  maxEntries: 10,
+                  maxAgeSeconds: 60 * 60 * 24 * 365,
+                },
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+              },
+            },
+            {
+              urlPattern: /^https:\/\/(cdn\.jsdelivr\.net|unpkg\.com|fastly\.jsdelivr\.net)\/.*\.(wasm|js)$/i,
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'cdn-archive-wasm-cache',
                 expiration: {
                   maxEntries: 10,
                   maxAgeSeconds: 60 * 60 * 24 * 365,

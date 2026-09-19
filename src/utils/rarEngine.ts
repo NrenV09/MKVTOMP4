@@ -4,17 +4,121 @@ import { extractWithSevenZip } from './sevenZipEngine';
 
 let cachedUnrarWasmBinary: ArrayBuffer | null = null;
 
-async function getUnrarWasmBinary(): Promise<ArrayBuffer> {
-  if (cachedUnrarWasmBinary) {
-    return cachedUnrarWasmBinary;
+const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
+
+function isValidWasm(buf: ArrayBuffer): boolean {
+  if (!buf || buf.byteLength < 4) return false;
+  const u8 = new Uint8Array(buf.slice(0, 4));
+  return (
+    u8[0] === WASM_MAGIC[0] &&
+    u8[1] === WASM_MAGIC[1] &&
+    u8[2] === WASM_MAGIC[2] &&
+    u8[3] === WASM_MAGIC[3]
+  );
+}
+
+async function fetchWasmCandidate(url: string): Promise<ArrayBuffer | null> {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const buf = await res.arrayBuffer();
+    if (isValidWasm(buf)) {
+      return buf;
+    }
+  } catch {
+    // try next
   }
-  const response = await fetch('/rar/unrar.wasm');
-  if (!response.ok) {
-    throw new Error(`Failed to load unrar WebAssembly binary: HTTP ${response.status}`);
+  return null;
+}
+
+async function getUnrarWasmBinary(
+  onProgress?: (percent: number, status: string) => void
+): Promise<ArrayBuffer> {
+  if (cachedUnrarWasmBinary && isValidWasm(cachedUnrarWasmBinary)) {
+    return cachedUnrarWasmBinary.slice(0);
   }
-  const buffer = await response.arrayBuffer();
-  cachedUnrarWasmBinary = buffer;
-  return buffer;
+
+  const CACHE_NAME = 'archive-wasm-runtime-cache';
+  if (typeof window !== 'undefined' && 'caches' in window) {
+    try {
+      const cache = await window.caches.open(CACHE_NAME);
+      const matched = await cache.match('rar/unrar.wasm');
+      if (matched) {
+        const buf = await matched.arrayBuffer();
+        if (isValidWasm(buf)) {
+          cachedUnrarWasmBinary = buf;
+          return buf.slice(0);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  const candidates: string[] = [];
+  const base =
+    typeof import.meta !== 'undefined' && import.meta.env?.BASE_URL
+      ? import.meta.env.BASE_URL.replace(/\/$/, '')
+      : '';
+  if (base) {
+    candidates.push(`${base}/rar/unrar.wasm`);
+  }
+
+  if (typeof document !== 'undefined' && document.baseURI) {
+    try {
+      candidates.push(new URL('rar/unrar.wasm', document.baseURI).href);
+    } catch {
+      // ignore
+    }
+  }
+
+  if (typeof window !== 'undefined' && window.location) {
+    try {
+      candidates.push(new URL('./rar/unrar.wasm', window.location.href).href);
+      candidates.push(
+        new URL('rar/unrar.wasm', window.location.origin + window.location.pathname).href
+      );
+      candidates.push(`${window.location.origin}/rar/unrar.wasm`);
+    } catch {
+      // ignore
+    }
+  }
+
+  candidates.push('/rar/unrar.wasm');
+  candidates.push('./rar/unrar.wasm');
+  candidates.push('rar/unrar.wasm');
+  candidates.push('https://cdn.jsdelivr.net/npm/node-unrar-js@2.0.2/dist/js/unrar.wasm');
+  candidates.push('https://unpkg.com/node-unrar-js@2.0.2/dist/js/unrar.wasm');
+
+  const uniqueCandidates = Array.from(new Set(candidates));
+
+  for (let i = 0; i < uniqueCandidates.length; i++) {
+    const url = uniqueCandidates[i];
+    onProgress?.(
+      20 + Math.floor((i / uniqueCandidates.length) * 10),
+      'Preparing UnRAR engine...'
+    );
+    const buf = await fetchWasmCandidate(url);
+    if (buf) {
+      cachedUnrarWasmBinary = buf;
+      if (typeof window !== 'undefined' && 'caches' in window) {
+        try {
+          const cache = await window.caches.open(CACHE_NAME);
+          await cache.put(
+            'rar/unrar.wasm',
+            new Response(buf.slice(0), {
+              headers: { 'Content-Type': 'application/wasm' },
+            })
+          );
+        } catch {
+          // ignore
+        }
+      }
+      return buf.slice(0);
+    }
+  }
+
+  throw new Error('Failed to load unrar WebAssembly binary from all sources.');
 }
 
 /**
@@ -28,7 +132,7 @@ export async function extractRarArchive(
   onProgress?.(20, 'Loading UnRAR WebAssembly module...');
 
   try {
-    const wasmBinary = await getUnrarWasmBinary();
+    const wasmBinary = await getUnrarWasmBinary(onProgress);
     onProgress?.(35, 'Initializing official UnRAR 6.x engine...');
 
     const bufferCopy = new Uint8Array(archiveBytes.byteLength);

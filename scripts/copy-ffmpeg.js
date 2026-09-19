@@ -15,13 +15,29 @@ const targets = [
     src: path.join(root, 'node_modules', '@ffmpeg', 'core-mt', 'dist', 'esm'),
     dest: path.join(root, 'public', 'ffmpeg', 'core-mt'),
   },
+  {
+    src: path.join(root, 'node_modules', '7z-wasm', '7zz.wasm'),
+    dest: path.join(root, 'public', '7z', '7zz.wasm'),
+    isFile: true,
+  },
+  {
+    src: path.join(root, 'node_modules', 'node-unrar-js', 'dist', 'js', 'unrar.wasm'),
+    dest: path.join(root, 'public', 'rar', 'unrar.wasm'),
+    isFile: true,
+  },
 ];
 
-for (const { src, dest } of targets) {
+for (const { src, dest, isFile } of targets) {
   if (fs.existsSync(src)) {
-    fs.mkdirSync(dest, { recursive: true });
-    fs.cpSync(src, dest, { recursive: true });
-    console.log(`Copied ffmpeg assets from ${src} to ${dest}`);
+    if (isFile) {
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(src, dest);
+      console.log(`Copied wasm binary from ${src} to ${dest}`);
+    } else {
+      fs.mkdirSync(dest, { recursive: true });
+      fs.cpSync(src, dest, { recursive: true });
+      console.log(`Copied directory assets from ${src} to ${dest}`);
+    }
   } else {
     console.warn(`Source path not found: ${src}`);
   }

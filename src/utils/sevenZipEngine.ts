@@ -1,17 +1,167 @@
 import SevenZip, { SevenZipModule } from '7z-wasm';
 import { ExtractedArchiveItem, guessMimeType, getPreviewType } from './archiveEngine';
 
-let cachedSevenZipModule: any = null;
+let cached7zWasmBinary: ArrayBuffer | null = null;
+let cachedBlobUrl: string | null = null;
+
+const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d]; // \0asm
+
+function isValidWasm(buf: ArrayBuffer): boolean {
+  if (!buf || buf.byteLength < 4) return false;
+  const u8 = new Uint8Array(buf.slice(0, 4));
+  return (
+    u8[0] === WASM_MAGIC[0] &&
+    u8[1] === WASM_MAGIC[1] &&
+    u8[2] === WASM_MAGIC[2] &&
+    u8[3] === WASM_MAGIC[3]
+  );
+}
+
+async function fetchWasmCandidate(url: string): Promise<ArrayBuffer | null> {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const buf = await res.arrayBuffer();
+    if (isValidWasm(buf)) {
+      return buf;
+    }
+  } catch {
+    // try next candidate
+  }
+  return null;
+}
+
+/**
+ * Fetch and verify the 7zz.wasm binary with multi-source fallback (local base, root, CDN)
+ */
+export async function get7zWasmBinary(
+  onProgress?: (percent: number, msg: string) => void
+): Promise<ArrayBuffer> {
+  if (cached7zWasmBinary && isValidWasm(cached7zWasmBinary)) {
+    return cached7zWasmBinary.slice(0);
+  }
+
+  onProgress?.(15, 'Locating 7-Zip WebAssembly core...');
+
+  // 1. Try CacheStorage first (if available and offline)
+  const CACHE_NAME = 'archive-wasm-runtime-cache';
+  if (typeof window !== 'undefined' && 'caches' in window) {
+    try {
+      const cache = await window.caches.open(CACHE_NAME);
+      const matched = await cache.match('7z/7zz.wasm');
+      if (matched) {
+        const buf = await matched.arrayBuffer();
+        if (isValidWasm(buf)) {
+          cached7zWasmBinary = buf;
+          return buf.slice(0);
+        }
+      }
+    } catch {
+      // ignore cache check error
+    }
+  }
+
+  // 2. Build candidate URLs
+  const candidates: string[] = [];
+
+  // Vite base path
+  const base =
+    typeof import.meta !== 'undefined' && import.meta.env?.BASE_URL
+      ? import.meta.env.BASE_URL.replace(/\/$/, '')
+      : '';
+  if (base) {
+    candidates.push(`${base}/7z/7zz.wasm`);
+  }
+
+  // Document base URI
+  if (typeof document !== 'undefined' && document.baseURI) {
+    try {
+      candidates.push(new URL('7z/7zz.wasm', document.baseURI).href);
+    } catch {
+      // ignore
+    }
+  }
+
+  // Window location paths
+  if (typeof window !== 'undefined' && window.location) {
+    try {
+      candidates.push(new URL('./7z/7zz.wasm', window.location.href).href);
+      candidates.push(
+        new URL('7z/7zz.wasm', window.location.origin + window.location.pathname).href
+      );
+      candidates.push(`${window.location.origin}/7z/7zz.wasm`);
+    } catch {
+      // ignore
+    }
+  }
+
+  // Standard root and relative paths
+  candidates.push('/7z/7zz.wasm');
+  candidates.push('./7z/7zz.wasm');
+  candidates.push('7z/7zz.wasm');
+
+  // Fast, reliable public CDN fallbacks
+  candidates.push('https://cdn.jsdelivr.net/npm/7z-wasm@1.2.0/7zz.wasm');
+  candidates.push('https://unpkg.com/7z-wasm@1.2.0/7zz.wasm');
+  candidates.push('https://fastly.jsdelivr.net/npm/7z-wasm@1.2.0/7zz.wasm');
+
+  // De-duplicate candidate list
+  const uniqueCandidates = Array.from(new Set(candidates));
+
+  for (let i = 0; i < uniqueCandidates.length; i++) {
+    const url = uniqueCandidates[i];
+    onProgress?.(
+      20 + Math.floor((i / uniqueCandidates.length) * 15),
+      'Preparing 7-Zip engine...'
+    );
+    const buf = await fetchWasmCandidate(url);
+    if (buf) {
+      cached7zWasmBinary = buf;
+
+      // Persist to CacheStorage for offline operation
+      if (typeof window !== 'undefined' && 'caches' in window) {
+        try {
+          const cache = await window.caches.open(CACHE_NAME);
+          await cache.put(
+            '7z/7zz.wasm',
+            new Response(buf.slice(0), {
+              headers: { 'Content-Type': 'application/wasm' },
+            })
+          );
+        } catch {
+          // ignore cache put error
+        }
+      }
+
+      return buf.slice(0);
+    }
+  }
+
+  throw new Error(
+    'Unable to load 7-Zip WebAssembly core (7zz.wasm). Please check network connection or reload the page.'
+  );
+}
 
 /**
  * Initialize or get 7z-wasm WebAssembly instance
  */
-export async function getSevenZipModule(onLog?: (line: string) => void): Promise<SevenZipModule> {
+export async function getSevenZipModule(
+  onProgress?: (percent: number, msg: string) => void,
+  onLog?: (line: string) => void
+): Promise<SevenZipModule> {
+  const wasmBinary = await get7zWasmBinary(onProgress);
+
+  if (!cachedBlobUrl) {
+    const blob = new Blob([wasmBinary], { type: 'application/wasm' });
+    cachedBlobUrl = URL.createObjectURL(blob);
+  }
+
   // Fresh module instance per major invocation prevents MEMFS collisions
   return await SevenZip({
+    wasmBinary,
     locateFile: (path: string) => {
       if (path.endsWith('.wasm')) {
-        return '/7z/7zz.wasm';
+        return cachedBlobUrl || path;
       }
       return path;
     },
@@ -83,15 +233,18 @@ export async function create7zArchive(
   onProgress?: (percent: number, status: string) => void
 ): Promise<Uint8Array> {
   onProgress?.(35, 'Initializing 7-Zip WebAssembly core...');
-  const sevenZip = await getSevenZipModule((line) => {
-    if (line.includes('%')) {
-      const match = line.match(/(\d+)%/);
-      if (match) {
-        const pct = parseInt(match[1], 10);
-        onProgress?.(40 + Math.floor(pct * 0.5), `7-Zip LZMA2 compressing (${pct}%)...`);
+  const sevenZip = await getSevenZipModule(
+    (pct, msg) => onProgress?.(pct, msg),
+    (line) => {
+      if (line.includes('%')) {
+        const match = line.match(/(\d+)%/);
+        if (match) {
+          const pct = parseInt(match[1], 10);
+          onProgress?.(40 + Math.floor(pct * 0.5), `7-Zip LZMA2 compressing (${pct}%)...`);
+        }
       }
     }
-  });
+  );
 
   const FS = sevenZip.FS;
   const inDir = `/in_${Date.now()}`;
@@ -186,15 +339,18 @@ export async function extractWithSevenZip(
   onProgress?: (percent: number, status: string) => void
 ): Promise<ExtractedArchiveItem[]> {
   onProgress?.(25, 'Spinning up 7-Zip WebAssembly extraction engine...');
-  const sevenZip = await getSevenZipModule((line) => {
-    if (line.includes('%')) {
-      const match = line.match(/(\d+)%/);
-      if (match) {
-        const pct = parseInt(match[1], 10);
-        onProgress?.(30 + Math.floor(pct * 0.5), `Unpacking archive (${pct}%)...`);
+  const sevenZip = await getSevenZipModule(
+    (pct, msg) => onProgress?.(pct, msg),
+    (line) => {
+      if (line.includes('%')) {
+        const match = line.match(/(\d+)%/);
+        if (match) {
+          const pct = parseInt(match[1], 10);
+          onProgress?.(30 + Math.floor(pct * 0.5), `Unpacking archive (${pct}%)...`);
+        }
       }
     }
-  });
+  );
 
   const FS = sevenZip.FS;
   const session = Date.now();
