@@ -78,6 +78,20 @@ export default defineConfig(() => {
               },
             },
             {
+              urlPattern: /\/(7z|rar)\/.*\.(wasm|js)$/i,
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'archive-wasm-runtime-cache',
+                expiration: {
+                  maxEntries: 10,
+                  maxAgeSeconds: 60 * 60 * 24 * 365,
+                },
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+              },
+            },
+            {
               urlPattern: /^https:\/\/fonts\.(googleapis|gstatic)\.com\/.*/i,
               handler: 'CacheFirst',
               options: {

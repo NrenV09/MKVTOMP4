@@ -50,7 +50,7 @@ import {
   WasmCacheStats,
 } from './utils/wasmCache';
 
-import { Header } from './components/Header';
+import { Header, WorkspaceMode } from './components/Header';
 import { MediaDropzone } from './components/MediaDropzone';
 import { SourceInspector } from './components/SourceInspector';
 import { EncodingControls } from './components/EncodingControls';
@@ -61,6 +61,8 @@ import { TerminalDock } from './components/TerminalDock';
 import { Footer } from './components/Footer';
 import { ComplianceModal, ComplianceTab } from './components/ComplianceModal';
 import { OfflineIndicator } from './components/OfflineIndicator';
+import { FileCompressorWorkstation } from './components/FileCompressorWorkstation';
+import { Film, Archive } from 'lucide-react';
 
 const DEFAULT_CONFIG: EncodingConfig = {
   targetCategory: 'video',
@@ -82,6 +84,7 @@ const DEFAULT_CONFIG: EncodingConfig = {
 };
 
 export default function App() {
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('media');
   const [engineReady, setEngineReady] = useState(false);
   const [engineLoading, setEngineLoading] = useState(false);
   const [engineError, setEngineError] = useState<string | null>(null);
@@ -863,6 +866,8 @@ export default function App() {
         onPurgeCache={purgeAllCaches}
         wasmCacheStats={wasmCacheStats}
         onOpenCompliance={handleOpenCompliance}
+        activeWorkspace={workspaceMode}
+        onSelectWorkspace={setWorkspaceMode}
       />
 
       {/* Main Workstation Canvas */}
@@ -898,101 +903,233 @@ export default function App() {
           </div>
         )}
 
-        {/* 1. SOURCE SELECTION / INSPECTOR */}
-        {!sourceMeta ? (
-          <div className="space-y-3">
-            <MediaDropzone
-              onFileSelected={handleFileSelected}
-              disabled={!engineReady || engineLoading}
-            />
-
-            {!engineReady && !engineError && (
-              <div className="flex items-center justify-center gap-2 text-xs font-mono text-zinc-500 py-2">
-                <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
-                <span>Mounting WebAssembly engine in background...</span>
+        {/* WORKSPACE VIEWS */}
+        {workspaceMode === 'compressor' ? (
+          /* File Compressor & Decompressor Full View */
+          <FileCompressorWorkstation />
+        ) : workspaceMode === 'split' ? (
+          /* Side-by-Side Split View */
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
+            {/* Left Column: Media Converter */}
+            <div className="space-y-4">
+              <div className="p-3 rounded-xl bg-[#121215] border border-zinc-800 flex items-center justify-between">
+                <span className="text-xs font-semibold text-zinc-200 flex items-center gap-2">
+                  <Film className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Media Converter (MKV/MP4)</span>
+                </span>
+                <button
+                  onClick={() => setWorkspaceMode('media')}
+                  className="text-[11px] text-zinc-400 hover:text-emerald-400 transition-colors"
+                >
+                  Focus View →
+                </button>
               </div>
-            )}
+
+              {!sourceMeta ? (
+                <div className="space-y-3">
+                  <MediaDropzone
+                    onFileSelected={handleFileSelected}
+                    disabled={!engineReady || engineLoading}
+                  />
+
+                  {!engineReady && !engineError && (
+                    <div className="flex items-center justify-center gap-2 text-xs font-mono text-zinc-500 py-2">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+                      <span>Mounting WebAssembly engine in background...</span>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <SourceInspector
+                    source={sourceMeta}
+                    isProbing={isProbing}
+                    onClear={handleClearFile}
+                    disabled={isConverting}
+                  />
+
+                  {result ? (
+                    <ResultPanel
+                      result={result}
+                      source={sourceMeta}
+                      onReset={handleClearFile}
+                      onAdjustSettings={() => {
+                        revokeActiveUrl();
+                        setIsPurged(false);
+                        setResult(null);
+                      }}
+                      onPurgeCache={purgeAllCaches}
+                      isPurged={isPurged}
+                    />
+                  ) : isConverting ? (
+                    <ProgressEngine
+                      telemetry={telemetry}
+                      onCancel={handleAbort}
+                      outputName={sourceMeta.name.replace(/\.[^/.]+$/, '') + getRecommendedExtension(config.container)}
+                    />
+                  ) : (
+                    <div className="space-y-4">
+                      <EncodingControls
+                        config={config}
+                        onChange={setConfig}
+                        source={sourceMeta}
+                        disabled={isConverting}
+                        hardwareCaps={hardwareCaps}
+                      />
+
+                      <div className="bg-[#121215] border border-zinc-800 rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xl">
+                        <div className="flex items-center gap-3 w-full sm:w-auto">
+                          <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+                            <Zap className="w-5 h-5 fill-current" />
+                          </div>
+                          <div>
+                            <div className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
+                              <span>Target format</span>
+                              <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono text-xs uppercase font-bold">
+                                .{config.container}
+                              </span>
+                            </div>
+                            <div className="text-xs text-zinc-400 font-mono mt-0.5">
+                              {config.videoCodec === 'copy' && config.audioCodec === 'copy'
+                                ? '⚡ Direct stream copy'
+                                : `Transcode (${config.speedPreset})`}
+                            </div>
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={handleStartConversion}
+                          disabled={!engineReady || isConverting}
+                          className="w-full sm:w-auto px-6 py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-zinc-950 font-bold text-xs transition-all shadow-md shadow-emerald-500/25 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                        >
+                          <span>Convert to .{config.container.toUpperCase()}</span>
+                        </button>
+                      </div>
+
+                      <CommandPreview commandArgs={currentCommandArgs} />
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Right Column: File Compressor & Decompressor */}
+            <div className="space-y-4">
+              <div className="p-3 rounded-xl bg-[#121215] border border-zinc-800 flex items-center justify-between">
+                <span className="text-xs font-semibold text-zinc-200 flex items-center gap-2">
+                  <Archive className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>File Compressor & Decompressor (ZIP / TAR / GZ)</span>
+                </span>
+                <button
+                  onClick={() => setWorkspaceMode('compressor')}
+                  className="text-[11px] text-zinc-400 hover:text-emerald-400 transition-colors"
+                >
+                  Focus View →
+                </button>
+              </div>
+
+              <FileCompressorWorkstation />
+            </div>
           </div>
         ) : (
-          <div className="space-y-4">
-            <SourceInspector
-              source={sourceMeta}
-              isProbing={isProbing}
-              onClear={handleClearFile}
-              disabled={isConverting}
-            />
-
-            {/* 2. RESULT PANEL (If completed) */}
-            {result ? (
-              <ResultPanel
-                result={result}
-                source={sourceMeta}
-                onReset={handleClearFile}
-                onAdjustSettings={() => {
-                  revokeActiveUrl();
-                  setIsPurged(false);
-                  setResult(null);
-                }}
-                onPurgeCache={purgeAllCaches}
-                isPurged={isPurged}
-              />
-            ) : isConverting ? (
-              /* 3. ACTIVE CONVERSION PROGRESS ENGINE */
-              <ProgressEngine
-                telemetry={telemetry}
-                onCancel={handleAbort}
-                outputName={sourceMeta.name.replace(/\.[^/.]+$/, '') + getRecommendedExtension(config.container)}
-              />
-            ) : (
-              /* 4. ENCODING CONTROLS & COMMAND PREVIEW */
-              <div className="space-y-4">
-                <EncodingControls
-                  config={config}
-                  onChange={setConfig}
-                  source={sourceMeta}
-                  disabled={isConverting}
-                  hardwareCaps={hardwareCaps}
+          /* Media Converter Standard Full View */
+          <>
+            {!sourceMeta ? (
+              <div className="space-y-3">
+                <MediaDropzone
+                  onFileSelected={handleFileSelected}
+                  disabled={!engineReady || engineLoading}
                 />
 
-                {/* Primary Action Button & Summary */}
-                <div className="bg-[#121215] border border-zinc-800 rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xl">
-                  <div className="flex items-center gap-3 w-full sm:w-auto">
-                    <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
-                      <Zap className="w-5 h-5 fill-current" />
-                    </div>
-                    <div>
-                      <div className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
-                        <span>Target format</span>
-                        <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono text-xs uppercase font-bold">
-                          .{config.container}
-                        </span>
-                      </div>
-                      <div className="text-xs text-zinc-400 font-mono mt-0.5">
-                        {config.videoCodec === 'copy' && config.audioCodec === 'copy'
-                          ? '⚡ Direct stream copy (lossless passthrough • near-instant remuxing)'
-                          : config.videoCodec === 'copy'
-                          ? '⚡ Video passthrough (stream copy) • Audio transcode'
-                          : config.hardwareAcceleration !== false && (hardwareCaps?.webcodecs.hwH264 || hardwareCaps?.webcodecs.available)
-                          ? '⚡ Hardware-accelerated encoding via WebCodecs & GPU'
-                          : `CPU multi-core transcode (${config.speedPreset})`}
-                      </div>
-                    </div>
+                {!engineReady && !engineError && (
+                  <div className="flex items-center justify-center gap-2 text-xs font-mono text-zinc-500 py-2">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+                    <span>Mounting WebAssembly engine in background...</span>
                   </div>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <SourceInspector
+                  source={sourceMeta}
+                  isProbing={isProbing}
+                  onClear={handleClearFile}
+                  disabled={isConverting}
+                />
 
-                  <button
-                    onClick={handleStartConversion}
-                    disabled={!engineReady || isConverting}
-                    aria-label={`Convert media file to ${config.container.toUpperCase()} container`}
-                    className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-zinc-950 font-sans font-bold text-sm tracking-wide transition-all shadow-lg shadow-emerald-500/25 flex items-center justify-center gap-2.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed hover:scale-[1.02] active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
-                  >
-                    <span>Convert to .{config.container.toUpperCase()}</span>
-                  </button>
-                </div>
+                {/* 2. RESULT PANEL (If completed) */}
+                {result ? (
+                  <ResultPanel
+                    result={result}
+                    source={sourceMeta}
+                    onReset={handleClearFile}
+                    onAdjustSettings={() => {
+                      revokeActiveUrl();
+                      setIsPurged(false);
+                      setResult(null);
+                    }}
+                    onPurgeCache={purgeAllCaches}
+                    isPurged={isPurged}
+                  />
+                ) : isConverting ? (
+                  /* 3. ACTIVE CONVERSION PROGRESS ENGINE */
+                  <ProgressEngine
+                    telemetry={telemetry}
+                    onCancel={handleAbort}
+                    outputName={sourceMeta.name.replace(/\.[^/.]+$/, '') + getRecommendedExtension(config.container)}
+                  />
+                ) : (
+                  /* 4. ENCODING CONTROLS & COMMAND PREVIEW */
+                  <div className="space-y-4">
+                    <EncodingControls
+                      config={config}
+                      onChange={setConfig}
+                      source={sourceMeta}
+                      disabled={isConverting}
+                      hardwareCaps={hardwareCaps}
+                    />
 
-                <CommandPreview commandArgs={currentCommandArgs} />
+                    {/* Primary Action Button & Summary */}
+                    <div className="bg-[#121215] border border-zinc-800 rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xl">
+                      <div className="flex items-center gap-3 w-full sm:w-auto">
+                        <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+                          <Zap className="w-5 h-5 fill-current" />
+                        </div>
+                        <div>
+                          <div className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
+                            <span>Target format</span>
+                            <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono text-xs uppercase font-bold">
+                              .{config.container}
+                            </span>
+                          </div>
+                          <div className="text-xs text-zinc-400 font-mono mt-0.5">
+                            {config.videoCodec === 'copy' && config.audioCodec === 'copy'
+                              ? '⚡ Direct stream copy (lossless passthrough • near-instant remuxing)'
+                              : config.videoCodec === 'copy'
+                              ? '⚡ Video passthrough (stream copy) • Audio transcode'
+                              : config.hardwareAcceleration !== false && (hardwareCaps?.webcodecs.hwH264 || hardwareCaps?.webcodecs.available)
+                              ? '⚡ Hardware-accelerated encoding via WebCodecs & GPU'
+                              : `CPU multi-core transcode (${config.speedPreset})`}
+                          </div>
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={handleStartConversion}
+                        disabled={!engineReady || isConverting}
+                        aria-label={`Convert media file to ${config.container.toUpperCase()} container`}
+                        className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-zinc-950 font-sans font-bold text-sm tracking-wide transition-all shadow-lg shadow-emerald-500/25 flex items-center justify-center gap-2.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed hover:scale-[1.02] active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+                      >
+                        <span>Convert to .{config.container.toUpperCase()}</span>
+                      </button>
+                    </div>
+
+                    <CommandPreview commandArgs={currentCommandArgs} />
+                  </div>
+                )}
               </div>
             )}
-          </div>
+          </>
         )}
       </main>
 

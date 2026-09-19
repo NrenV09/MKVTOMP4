@@ -1,9 +1,11 @@
 import React from 'react';
-import { Terminal, Trash2, Cpu, Zap, HardDrive, ShieldCheck } from 'lucide-react';
+import { Terminal, Trash2, Cpu, Zap, HardDrive, ShieldCheck, Film, Archive, Columns2 } from 'lucide-react';
 import { HardwareCapabilities } from '../utils/hardwareEngine';
 import { WasmCacheStats } from '../utils/wasmCache';
 import { ComplianceTab } from './ComplianceModal';
 import { PWAInstallButton } from './PWAInstallButton';
+
+export type WorkspaceMode = 'media' | 'compressor' | 'split';
 
 interface HeaderProps {
   engineReady: boolean;
@@ -17,6 +19,8 @@ interface HeaderProps {
   onPurgeCache?: () => void;
   wasmCacheStats?: WasmCacheStats | null;
   onOpenCompliance?: (tab: ComplianceTab) => void;
+  activeWorkspace?: WorkspaceMode;
+  onSelectWorkspace?: (mode: WorkspaceMode) => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -30,9 +34,11 @@ export const Header: React.FC<HeaderProps> = ({
   onPurgeCache,
   wasmCacheStats,
   onOpenCompliance,
+  activeWorkspace = 'media',
+  onSelectWorkspace,
 }) => {
   return (
-    <header className="border-b border-zinc-800 bg-[#0c0c0e] px-4 py-3 flex items-center justify-between text-xs select-none sticky top-0 z-30">
+    <header className="border-b border-zinc-800 bg-[#0c0c0e] px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs select-none sticky top-0 z-30">
       {/* Left: Title & Engine Status */}
       <div className="flex items-center gap-3">
         <div className="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-mono font-bold text-xs shrink-0">
@@ -64,9 +70,53 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
 
+      {/* Center: Workspace Mode Switcher (Beside each other) */}
+      {onSelectWorkspace && (
+        <div className="flex items-center p-1 rounded-xl bg-zinc-950 border border-zinc-800/90 shadow-inner">
+          <button
+            onClick={() => onSelectWorkspace('media')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+              activeWorkspace === 'media'
+                ? 'bg-emerald-500 text-zinc-950 shadow-sm'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60'
+            }`}
+            title="Video & Audio converter (MKV to MP4, codecs, remuxing)"
+          >
+            <Film className="w-3.5 h-3.5" />
+            <span>Media Converter</span>
+          </button>
+
+          <button
+            onClick={() => onSelectWorkspace('compressor')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+              activeWorkspace === 'compressor'
+                ? 'bg-emerald-500 text-zinc-950 shadow-sm'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60'
+            }`}
+            title="File compressor & archive decompressor (ZIP, TAR.GZ, GZ)"
+          >
+            <Archive className="w-3.5 h-3.5" />
+            <span>File Compressor & Decompressor</span>
+          </button>
+
+          <button
+            onClick={() => onSelectWorkspace('split')}
+            className={`hidden xl:flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+              activeWorkspace === 'split'
+                ? 'bg-emerald-500 text-zinc-950 shadow-sm'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60'
+            }`}
+            title="View Media Converter and File Compressor side-by-side"
+          >
+            <Columns2 className="w-3.5 h-3.5" />
+            <span>Side-by-Side</span>
+          </button>
+        </div>
+      )}
+
       {/* Middle: WebGPU & Hardware Acceleration Status */}
       {hardwareCaps && (
-        <div className="hidden md:flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-zinc-950/80 border border-zinc-800/80 font-mono text-[11px]">
+        <div className="hidden 2xl:flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-zinc-950/80 border border-zinc-800/80 font-mono text-[11px]">
           <div className="flex items-center gap-1.5">
             <Cpu className={`w-3.5 h-3.5 ${hardwareCaps.webgpu.available ? 'text-emerald-400' : 'text-zinc-500'}`} />
             <span className="text-zinc-400">WebGPU:</span>
