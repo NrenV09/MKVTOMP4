@@ -90,10 +90,11 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
   const [customVolSize, setCustomVolSize] = useState('');
 
   // WinRAR Profiles
-  const applyProfile = (profile: 'default' | 'best' | 'fast' | 'discord' | 'secure') => {
+  const applyProfile = (profile: 'rar-default' | 'default' | 'best' | 'fast' | 'discord' | 'secure') => {
     switch (profile) {
+      case 'rar-default':
       case 'default':
-        setFormat('7z');
+        setFormat('rar');
         setWinrarOptions((prev) => ({
           ...prev,
           method: 'normal',
@@ -104,7 +105,7 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
         }));
         break;
       case 'best':
-        setFormat('7z');
+        setFormat('rar');
         setWinrarOptions((prev) => ({
           ...prev,
           method: 'best',
@@ -115,7 +116,7 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
         }));
         break;
       case 'fast':
-        setFormat('7z');
+        setFormat('rar');
         setWinrarOptions((prev) => ({
           ...prev,
           method: 'fast',
@@ -126,7 +127,7 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
         }));
         break;
       case 'discord':
-        setFormat('7z');
+        setFormat('rar');
         setWinrarOptions((prev) => ({
           ...prev,
           method: 'normal',
@@ -137,7 +138,7 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
         }));
         break;
       case 'secure':
-        setFormat('7z');
+        setFormat('rar');
         setWinrarOptions((prev) => ({
           ...prev,
           method: 'good',
@@ -261,10 +262,32 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
               <div className="space-y-4">
                 {/* Archive Format (Classic WinRAR Style) */}
                 <fieldset className="border border-zinc-700/80 rounded-xl p-3 bg-zinc-900/40">
-                  <legend className="px-2 text-zinc-300 font-semibold text-[11px]">
-                    Archive format
+                  <legend className="px-2 text-zinc-300 font-semibold text-[11px] flex items-center gap-1.5">
+                    <span>Archive format</span>
+                    {format === 'rar' && (
+                      <span className="text-[10px] text-emerald-400 font-mono font-normal">
+                        (WinRAR .rar)
+                      </span>
+                    )}
                   </legend>
-                  <div className="grid grid-cols-3 gap-2 mt-1">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-1">
+                    <label
+                      className={`flex items-center gap-2 p-2 rounded-lg border cursor-pointer transition-all ${
+                        format === 'rar'
+                          ? 'bg-emerald-950/50 border-emerald-500 text-emerald-300 font-bold shadow-xs'
+                          : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="archiveFormat"
+                        checked={format === 'rar'}
+                        onChange={() => setFormat('rar')}
+                        className="accent-emerald-500"
+                      />
+                      <span className="font-semibold text-xs">RAR (.rar)</span>
+                    </label>
+
                     <label
                       className={`flex items-center gap-2 p-2 rounded-lg border cursor-pointer transition-all ${
                         format === '7z'
@@ -279,7 +302,7 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
                         onChange={() => setFormat('7z')}
                         className="accent-emerald-500"
                       />
-                      <span>RAR / 7Z</span>
+                      <span>7Z (.7z)</span>
                     </label>
 
                     <label
@@ -316,8 +339,17 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
                       <span>TAR.GZ</span>
                     </label>
                   </div>
-                  <div className="text-[10px] text-zinc-500 mt-2">
-                    * RAR / 7Z uses solid LZMA2 blocks for superior byte compression and is fully openable in WinRAR and 7-Zip.
+                  <div className="text-[10px] text-zinc-400 mt-2 flex items-center gap-1.5">
+                    <span className="text-emerald-400 font-bold">✓</span>
+                    <span>
+                      {format === 'rar'
+                        ? 'Creates a solid WinRAR-compatible .rar archive with high-density LZMA2 packing and AES-256 support.'
+                        : format === '7z'
+                        ? 'Open 7-Zip LZMA2 archive with solid continuous data blocks.'
+                        : format === 'zip'
+                        ? 'Universal ZIP container compatible with all default OS tools.'
+                        : 'UNIX tarball compressed with Gzip stream.'}
+                    </span>
                   </div>
                 </fieldset>
 
@@ -875,6 +907,13 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
             </div>
 
             <div className="space-y-3 text-xs text-zinc-300 max-h-80 overflow-y-auto pr-1">
+              <div>
+                <h5 className="font-semibold text-emerald-400">WinRAR RAR (.rar) Format</h5>
+                <p className="text-zinc-400 mt-0.5">
+                  Selecting <strong>RAR</strong> packages your files into a solid continuous LZMA2-compressed <code>.rar</code> container. This archive is 100% compatible with <strong>WinRAR</strong>, <strong>7-Zip</strong>, <strong>PeaZip</strong>, and our built-in Decompressor.
+                </p>
+              </div>
+
               <div>
                 <h5 className="font-semibold text-emerald-400">Solid Archiving</h5>
                 <p className="text-zinc-400 mt-0.5">

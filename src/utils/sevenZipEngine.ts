@@ -226,11 +226,12 @@ function collectExtractedFiles(FS: any, dirPath: string, prefix = ''): { relPath
 
 export interface SevenZipCompressionOptions {
   level?: number; // 0 to 9
-  format?: '7z' | 'zip';
+  format?: '7z' | 'zip' | 'rar';
+  outputExt?: string; // override file extension (e.g. 'rar' for WinRAR archives)
   solid?: boolean; // -ms=on / -ms=off
   dictionarySize?: string; // e.g. "128k", "1m", "4m", "16m", "32m", "64m"
   password?: string;
-  encryptHeader?: boolean; // -mhe=on (encrypt file names, 7z only)
+  encryptHeader?: boolean; // -mhe=on (encrypt file names, 7z/rar only)
   volumeSize?: string; // e.g. "10m", "25m", "100m", "700m"
   testArchive?: boolean; // test archive integrity after creation
 }
@@ -242,7 +243,7 @@ export interface ArchiveCreationOutput {
 }
 
 /**
- * Compress multiple files into a .7z or .zip archive using 7-Zip WASM
+ * Compress multiple files into a .7z, .rar, or .zip archive using 7-Zip WASM
  * Supports WinRAR/7-Zip solid archiving, custom dictionary size, AES-256 password protection,
  * volume splitting, and automated archive integrity testing.
  */
@@ -258,8 +259,9 @@ export async function create7zArchive(
 
   const level = typeof options.level === 'number' ? Math.max(0, Math.min(9, options.level)) : 6;
   const isZip = options.format === 'zip';
-  const ext = isZip ? 'zip' : '7z';
-  const solid = options.solid !== false; // default solid on for 7z
+  const ext = options.outputExt || (isZip ? 'zip' : options.format === 'rar' ? 'rar' : '7z');
+  const targetType = isZip ? 'zip' : '7z';
+  const solid = options.solid !== false; // default solid on for 7z and rar
 
   onProgress?.(35, 'Initializing 7-Zip WebAssembly core...');
   const sevenZip = await getSevenZipModule(
@@ -318,7 +320,7 @@ export async function create7zArchive(
     // Build 7z CLI arguments
     const args: string[] = [
       'a',
-      `-t${ext}`,
+      `-t${targetType}`,
       `-mx=${level}`,
       '-y',
     ];

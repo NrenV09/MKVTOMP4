@@ -24,7 +24,7 @@ export interface StagedFile {
   lastModified: number;
 }
 
-export type CompressionFormat = 'zip' | '7z' | 'tar.gz' | 'tar' | 'gz';
+export type CompressionFormat = 'rar' | '7z' | 'zip' | 'tar.gz' | 'tar' | 'gz';
 export type CompressionLevel = 0 | 1 | 4 | 6 | 9; // 0: Store, 1: Fast, 4: Balanced, 6: High, 9: Maximum
 
 export type WinRarCompressionMethod = 'store' | 'fastest' | 'fast' | 'normal' | 'good' | 'best';
@@ -366,12 +366,19 @@ export async function compressFiles(
     });
 
     finalBlob = new Blob([compressedU8], { type: 'application/zip' });
-  } else if (format === '7z' || useSevenZipForZip) {
+  } else if (format === 'rar' || format === '7z' || useSevenZipForZip) {
     const isZip = format === 'zip';
-    defaultExt = isZip ? '.zip' : '.7z';
+    const isRar = format === 'rar';
+    defaultExt = isZip ? '.zip' : isRar ? '.rar' : '.7z';
     onProgress?.(
       30,
-      `Compressing with ${isZip ? 'ZIP Deflate' : 'WinRAR / 7-Zip LZMA2'} (Method: ${
+      `Compressing with ${
+        isZip
+          ? 'ZIP Deflate'
+          : isRar
+          ? 'WinRAR RAR (LZMA2 Solid)'
+          : 'WinRAR / 7-Zip LZMA2'
+      } (Method: ${
         winrarOptions?.method?.toUpperCase() || `Level ${effectiveLevel}`
       })...`
     );
@@ -380,7 +387,8 @@ export async function compressFiles(
       loadedFiles,
       {
         level: effectiveLevel,
-        format: isZip ? 'zip' : '7z',
+        format: isZip ? 'zip' : isRar ? 'rar' : '7z',
+        outputExt: isRar ? 'rar' : undefined,
         solid: winrarOptions?.solid !== false,
         dictionarySize: winrarOptions?.dictionarySize,
         password: winrarOptions?.password,
@@ -392,7 +400,11 @@ export async function compressFiles(
     );
 
     finalBlob = new Blob([sevenZipResult.mainData], {
-      type: isZip ? 'application/zip' : 'application/x-7z-compressed',
+      type: isZip
+        ? 'application/zip'
+        : isRar
+        ? 'application/vnd.rar'
+        : 'application/x-7z-compressed',
     });
     archiveVerified = !!sevenZipResult.verified;
 

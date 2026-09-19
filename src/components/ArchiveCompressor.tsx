@@ -39,7 +39,7 @@ import { WinRarDialog, WinRarBooksIcon } from './WinRarDialog';
 
 export const ArchiveCompressor: React.FC = () => {
   const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
-  const [format, setFormat] = useState<CompressionFormat>('7z');
+  const [format, setFormat] = useState<CompressionFormat>('rar');
   const [level, setLevel] = useState<CompressionLevel>(6);
   const [archiveName, setArchiveName] = useState<string>('');
   const [isCompressing, setIsCompressing] = useState(false);
@@ -165,8 +165,10 @@ export const ArchiveCompressor: React.FC = () => {
 
   const getFormatBadge = (fmt: CompressionFormat) => {
     switch (fmt) {
+      case 'rar':
+        return { label: 'RAR', desc: 'WinRAR archive format with Solid LZMA2 blocks & AES-256', ext: '.rar' };
       case '7z':
-        return { label: 'RAR / 7Z', desc: 'WinRAR LZMA2 solid archiving with AES-256', ext: '.7z' };
+        return { label: '7Z', desc: '7-Zip open archive format with LZMA2 solid packing', ext: '.7z' };
       case 'zip':
         return { label: 'ZIP', desc: 'Universal compatibility across Windows, Mac, Linux, Mobile', ext: '.zip' };
       case 'tar.gz':
@@ -276,10 +278,10 @@ export const ArchiveCompressor: React.FC = () => {
           </div>
 
           <h3 className="mt-4 text-base font-semibold text-zinc-100">
-            Choose or drop files to compress in WinRAR style
+            Choose or drop files to create .rar, .7z, or .zip archives
           </h3>
           <p className="mt-1 text-xs text-zinc-400 max-w-md mx-auto">
-            Pack files with <strong className="text-zinc-200">WinRAR Solid LZMA2</strong> (maximum compression), <strong className="text-zinc-200">ZIP</strong>, <strong className="text-zinc-200">TAR.GZ</strong>, or split into multi-volume parts. 100% offline in browser memory.
+            Pack files into <strong className="text-zinc-200">.rar</strong> with WinRAR Solid LZMA2, <strong className="text-zinc-200">.7z</strong>, <strong className="text-zinc-200">.zip</strong>, <strong className="text-zinc-200">.tar.gz</strong>, or split into multi-volume parts. 100% offline in browser memory.
           </p>
 
           <div className="mt-5 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold text-xs transition-colors shadow-md">
@@ -403,7 +405,7 @@ export const ArchiveCompressor: React.FC = () => {
                     Archive Format
                   </label>
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
-                    {(['7z', 'zip', 'tar.gz', 'tar', 'gz'] as CompressionFormat[]).map((fmt) => {
+                    {(['rar', '7z', 'zip', 'tar.gz', 'tar', 'gz'] as CompressionFormat[]).map((fmt) => {
                       const badge = getFormatBadge(fmt);
                       const active = format === fmt;
                       return (
