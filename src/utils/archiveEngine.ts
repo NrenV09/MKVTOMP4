@@ -27,6 +27,28 @@ export interface StagedFile {
 export type CompressionFormat = 'zip' | '7z' | 'tar.gz' | 'tar' | 'gz';
 export type CompressionLevel = 0 | 1 | 4 | 6 | 9; // 0: Store, 1: Fast, 4: Balanced, 6: High, 9: Maximum
 
+export type WinRarCompressionMethod = 'store' | 'fastest' | 'fast' | 'normal' | 'good' | 'best';
+
+export interface WinRarCompressionOptions {
+  method?: WinRarCompressionMethod;
+  solid?: boolean; // WinRAR solid archive (LZMA2 solid blocks)
+  dictionarySize?: 'auto' | '128k' | '256k' | '512k' | '1m' | '2m' | '4m' | '8m' | '16m' | '32m' | '64m' | '128m';
+  splitVolumeSize?: 'none' | '10m' | '25m' | '100m' | '700m' | '4481m' | string;
+  password?: string;
+  encryptHeader?: boolean; // Encrypt file names / headers
+  lockArchive?: boolean; // Lock archive against changes
+  recoveryRecord?: boolean; // Add recovery record / checksum
+  testArchive?: boolean; // Test archived files integrity
+  comment?: string; // Archive comment
+  deleteFilesAfter?: boolean;
+}
+
+export interface ArchiveVolumeItem {
+  name: string;
+  blob: Blob;
+  size: number;
+}
+
 export interface CompressionResult {
   blob: Blob;
   outputName: string;
@@ -36,6 +58,11 @@ export interface CompressionResult {
   elapsedMs: number;
   format: CompressionFormat;
   fileCount: number;
+  volumes?: ArchiveVolumeItem[];
+  verified?: boolean;
+  isSolid?: boolean;
+  isEncrypted?: boolean;
+  winrarMethodName?: string;
 }
 
 export interface ExtractedArchiveItem {
@@ -250,6 +277,15 @@ function parseTarArchive(data: Uint8Array): { name: string; data: Uint8Array; mt
   return result;
 }
 
+export const WINRAR_METHOD_MAP: Record<WinRarCompressionMethod, number> = {
+  store: 0,
+  fastest: 1,
+  fast: 3,
+  normal: 5,
+  good: 7,
+  best: 9,
+};
+
 /**
  * Compress staged files into selected archive format
  */
@@ -258,7 +294,8 @@ export async function compressFiles(
   format: CompressionFormat,
   level: CompressionLevel,
   customArchiveName?: string,
-  onProgress?: (percent: number, status: string) => void
+  onProgress?: (percent: number, status: string) => void,
+  winrarOptions?: WinRarCompressionOptions
 ): Promise<CompressionResult> {
   if (stagedFiles.length === 0) {
     throw new Error('No files provided for compression.');
@@ -267,6 +304,10 @@ export async function compressFiles(
   const startTime = Date.now();
   let totalOriginalSize = 0;
   onProgress?.(5, 'Reading input files into memory...');
+
+  // Determine effective level (WinRAR method override if supplied)
+  const effectiveLevel =
+    winrarOptions?.method ? WINRAR_METHOD_MAP[winrarOptions.method] : level;
 
   // Read all files to memory
   const loadedFiles: { name: string; data: Uint8Array; mtime: number }[] = [];
@@ -288,17 +329,26 @@ export async function compressFiles(
 
   let finalBlob: Blob;
   let defaultExt = '.zip';
+  let generatedVolumes: ArchiveVolumeItem[] | undefined;
+  let archiveVerified = false;
 
-  if (format === 'zip') {
+  // If format is 7z OR (zip with password / volume splitting / WinRAR options), route to 7z WASM engine
+  const useSevenZipForZip =
+    format === 'zip' &&
+    (!!winrarOptions?.password ||
+      (!!winrarOptions?.splitVolumeSize && winrarOptions.splitVolumeSize !== 'none') ||
+      !!winrarOptions?.testArchive);
+
+  if (format === 'zip' && !useSevenZipForZip) {
     defaultExt = '.zip';
-    onProgress?.(30, `Compressing into ZIP archive (Level: ${level})...`);
+    onProgress?.(30, `Compressing into ZIP archive (Level: ${effectiveLevel})...`);
 
     const zippableObj: Zippable = {};
     for (const f of loadedFiles) {
       zippableObj[f.name] = [
         f.data,
         {
-          level: level as 0 | 1 | 4 | 6 | 9,
+          level: Math.min(9, Math.max(0, effectiveLevel)) as 0 | 1 | 4 | 6 | 9,
           mtime: new Date(f.mtime),
         },
       ];
@@ -307,7 +357,7 @@ export async function compressFiles(
     const compressedU8 = await new Promise<Uint8Array>((resolve, reject) => {
       zip(
         zippableObj,
-        { level: level as 0 | 1 | 4 | 6 | 9 },
+        { level: Math.min(9, Math.max(0, effectiveLevel)) as 0 | 1 | 4 | 6 | 9 },
         (err, data) => {
           if (err) reject(err);
           else resolve(data);
@@ -316,11 +366,43 @@ export async function compressFiles(
     });
 
     finalBlob = new Blob([compressedU8], { type: 'application/zip' });
-  } else if (format === '7z') {
-    defaultExt = '.7z';
-    onProgress?.(30, `Compressing files into .7z archive using 7-Zip LZMA2 (Level: ${level})...`);
-    const sevenZipBytes = await create7zArchive(loadedFiles, level, onProgress);
-    finalBlob = new Blob([sevenZipBytes], { type: 'application/x-7z-compressed' });
+  } else if (format === '7z' || useSevenZipForZip) {
+    const isZip = format === 'zip';
+    defaultExt = isZip ? '.zip' : '.7z';
+    onProgress?.(
+      30,
+      `Compressing with ${isZip ? 'ZIP Deflate' : 'WinRAR / 7-Zip LZMA2'} (Method: ${
+        winrarOptions?.method?.toUpperCase() || `Level ${effectiveLevel}`
+      })...`
+    );
+
+    const sevenZipResult = await create7zArchive(
+      loadedFiles,
+      {
+        level: effectiveLevel,
+        format: isZip ? 'zip' : '7z',
+        solid: winrarOptions?.solid !== false,
+        dictionarySize: winrarOptions?.dictionarySize,
+        password: winrarOptions?.password,
+        encryptHeader: winrarOptions?.encryptHeader,
+        volumeSize: winrarOptions?.splitVolumeSize,
+        testArchive: winrarOptions?.testArchive,
+      },
+      onProgress
+    );
+
+    finalBlob = new Blob([sevenZipResult.mainData], {
+      type: isZip ? 'application/zip' : 'application/x-7z-compressed',
+    });
+    archiveVerified = !!sevenZipResult.verified;
+
+    if (sevenZipResult.volumes && sevenZipResult.volumes.length > 0) {
+      generatedVolumes = sevenZipResult.volumes.map((v) => ({
+        name: v.name,
+        blob: new Blob([v.data], { type: 'application/octet-stream' }),
+        size: v.size,
+      }));
+    }
   } else if (format === 'tar') {
     defaultExt = '.tar';
     onProgress?.(40, 'Packaging into POSIX TAR archive...');
@@ -331,11 +413,14 @@ export async function compressFiles(
     onProgress?.(30, 'Packaging files into TAR buffer...');
     const tarData = createTarArchive(loadedFiles);
 
-    onProgress?.(50, `Gzip compressing TAR archive (Level: ${level})...`);
+    onProgress?.(50, `Gzip compressing TAR archive (Level: ${effectiveLevel})...`);
     const gzippedU8 = await new Promise<Uint8Array>((resolve, reject) => {
       gzip(
         tarData,
-        { level: level as 0 | 1 | 4 | 6 | 9, mtime: new Date() },
+        {
+          level: Math.min(9, Math.max(0, effectiveLevel)) as 0 | 1 | 4 | 6 | 9,
+          mtime: new Date(),
+        },
         (err, data) => {
           if (err) reject(err);
           else resolve(data);
@@ -354,7 +439,7 @@ export async function compressFiles(
       const gzippedU8 = await new Promise<Uint8Array>((resolve, reject) => {
         gzip(
           tarData,
-          { level: level as 0 | 1 | 4 | 6 | 9 },
+          { level: Math.min(9, Math.max(0, effectiveLevel)) as 0 | 1 | 4 | 6 | 9 },
           (err, data) => {
             if (err) reject(err);
             else resolve(data);
@@ -368,7 +453,10 @@ export async function compressFiles(
       const gzippedU8 = await new Promise<Uint8Array>((resolve, reject) => {
         gzip(
           single.data,
-          { level: level as 0 | 1 | 4 | 6 | 9, filename: single.name },
+          {
+            level: Math.min(9, Math.max(0, effectiveLevel)) as 0 | 1 | 4 | 6 | 9,
+            filename: single.name,
+          },
           (err, data) => {
             if (err) reject(err);
             else resolve(data);
@@ -413,6 +501,11 @@ export async function compressFiles(
     elapsedMs,
     format,
     fileCount: loadedFiles.length,
+    volumes: generatedVolumes,
+    verified: archiveVerified,
+    isSolid: winrarOptions?.solid !== false,
+    isEncrypted: !!winrarOptions?.password,
+    winrarMethodName: winrarOptions?.method,
   };
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "MKV to MP4 Converter",
-  "description": "Universal offline WebAssembly media converter, remuxing workstation, and high-speed file compressor and decompressor supporting MKV to MP4, video, audio, 7Z, RAR, ZIP, TAR, and GZ archives with zero server uploads.",
+  "description": "Universal offline WebAssembly media converter, remuxing workstation, and file compressor with WinRAR compression style, supporting MKV to MP4, video, audio, 7Z, RAR, ZIP, TAR, and GZ archives with zero server uploads.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

@@ -36,7 +36,7 @@ export const FileCompressorWorkstation: React.FC<FileCompressorWorkstationProps>
                   : 'bg-zinc-800 text-zinc-400'
               }`}
             >
-              7Z • ZIP • TAR • GZ
+              WinRAR Style • 7Z • ZIP
             </span>
           </button>
 

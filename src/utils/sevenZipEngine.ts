@@ -224,14 +224,43 @@ function collectExtractedFiles(FS: any, dirPath: string, prefix = ''): { relPath
   return results;
 }
 
+export interface SevenZipCompressionOptions {
+  level?: number; // 0 to 9
+  format?: '7z' | 'zip';
+  solid?: boolean; // -ms=on / -ms=off
+  dictionarySize?: string; // e.g. "128k", "1m", "4m", "16m", "32m", "64m"
+  password?: string;
+  encryptHeader?: boolean; // -mhe=on (encrypt file names, 7z only)
+  volumeSize?: string; // e.g. "10m", "25m", "100m", "700m"
+  testArchive?: boolean; // test archive integrity after creation
+}
+
+export interface ArchiveCreationOutput {
+  mainData: Uint8Array;
+  volumes?: { name: string; data: Uint8Array; size: number }[];
+  verified?: boolean;
+}
+
 /**
- * Compress multiple files into a .7z archive using LZMA2/7-Zip WASM
+ * Compress multiple files into a .7z or .zip archive using 7-Zip WASM
+ * Supports WinRAR/7-Zip solid archiving, custom dictionary size, AES-256 password protection,
+ * volume splitting, and automated archive integrity testing.
  */
 export async function create7zArchive(
   files: { name: string; data: Uint8Array; mtime?: number }[],
-  level: number, // 0 to 9
+  optionsOrLevel: number | SevenZipCompressionOptions,
   onProgress?: (percent: number, status: string) => void
-): Promise<Uint8Array> {
+): Promise<ArchiveCreationOutput> {
+  const options: SevenZipCompressionOptions =
+    typeof optionsOrLevel === 'number'
+      ? { level: optionsOrLevel }
+      : { ...optionsOrLevel };
+
+  const level = typeof options.level === 'number' ? Math.max(0, Math.min(9, options.level)) : 6;
+  const isZip = options.format === 'zip';
+  const ext = isZip ? 'zip' : '7z';
+  const solid = options.solid !== false; // default solid on for 7z
+
   onProgress?.(35, 'Initializing 7-Zip WebAssembly core...');
   const sevenZip = await getSevenZipModule(
     (pct, msg) => onProgress?.(pct, msg),
@@ -240,15 +269,16 @@ export async function create7zArchive(
         const match = line.match(/(\d+)%/);
         if (match) {
           const pct = parseInt(match[1], 10);
-          onProgress?.(40 + Math.floor(pct * 0.5), `7-Zip LZMA2 compressing (${pct}%)...`);
+          onProgress?.(40 + Math.floor(pct * 0.5), `Compressing archive (${pct}%)...`);
         }
       }
     }
   );
 
   const FS = sevenZip.FS;
-  const inDir = `/in_${Date.now()}`;
-  const outArchive = `/output_${Date.now()}.7z`;
+  const session = Date.now();
+  const inDir = `/in_${session}`;
+  const outArchiveBase = `/output_${session}.${ext}`;
 
   try {
     FS.mkdir(inDir);
@@ -276,43 +306,115 @@ export async function create7zArchive(
       fileNames.push(f.name);
       onProgress?.(
         40 + Math.floor(((i + 1) / files.length) * 15),
-        `Prepared ${f.name} for 7-Zip engine`
+        `Prepared ${f.name} for compression engine`
       );
     }
 
-    onProgress?.(55, `Running 7-Zip LZMA2 compression (Level: ${level})...`);
+    onProgress?.(55, `Running 7-Zip ${isZip ? 'Deflate' : 'LZMA2'} compression (Level: ${level})...`);
 
     // Change directory to inDir so archive stores relative names
     FS.chdir(inDir);
 
     // Build 7z CLI arguments
-    // 'a' = add
-    // '-t7z' = 7z format
-    // '-mx=N' = compression level (0, 1, 4, 6, 9)
-    // '-m0=lzma2' = LZMA2 compression
-    // '-ms=on' = solid archive for maximum ratio
-    // '-y' = assume yes
-    const args = [
+    const args: string[] = [
       'a',
-      '-t7z',
+      `-t${ext}`,
       `-mx=${level}`,
-      '-m0=lzma2',
-      '-ms=on',
       '-y',
-      outArchive,
-      '*',
     ];
+
+    if (!isZip) {
+      args.push('-m0=lzma2');
+      if (solid) {
+        args.push('-ms=on');
+      } else {
+        args.push('-ms=off');
+      }
+
+      if (options.dictionarySize && options.dictionarySize !== 'auto') {
+        args.push(`-md=${options.dictionarySize}`);
+      }
+
+      if (options.password) {
+        args.push(`-p${options.password}`);
+        if (options.encryptHeader) {
+          args.push('-mhe=on');
+        }
+      }
+    } else {
+      // ZIP format
+      if (options.password) {
+        args.push(`-p${options.password}`);
+      }
+    }
+
+    // Volume splitting (e.g. -v10m, -v25m)
+    if (options.volumeSize && options.volumeSize !== 'none') {
+      args.push(`-v${options.volumeSize}`);
+    }
+
+    args.push(outArchiveBase, '*');
 
     sevenZip.callMain(args);
 
-    onProgress?.(90, 'Extracting compressed 7z payload...');
-    const outBytes = FS.readFile(outArchive);
-    // Clone Uint8Array so memory isn't tied to MEMFS
+    // Locate generated archive files in root
+    const rootFiles = FS.readdir('/').filter((f: string) => f.startsWith(`output_${session}`));
+    if (rootFiles.length === 0) {
+      throw new Error('7-Zip compression failed: output archive was not generated.');
+    }
+
+    let verified = false;
+    if (options.testArchive) {
+      onProgress?.(85, 'Running WinRAR/7-Zip archive integrity self-test...');
+      try {
+        const testTarget = `/${rootFiles[0]}`;
+        const testArgs = ['t'];
+        if (options.password) {
+          testArgs.push(`-p${options.password}`);
+        }
+        testArgs.push(testTarget);
+        sevenZip.callMain(testArgs);
+        verified = true;
+      } catch (e) {
+        console.warn('Archive verification test warning:', e);
+      }
+    }
+
+    onProgress?.(90, 'Extracting compressed payload into memory...');
+
+    // If multi-volume, collect all volumes
+    if (rootFiles.length > 1 || (options.volumeSize && options.volumeSize !== 'none')) {
+      // Sort parts naturally: .001, .002, etc.
+      rootFiles.sort();
+      const volumes = rootFiles.map((vName: string) => {
+        const full = `/${vName}`;
+        const raw = FS.readFile(full);
+        const cleanName = vName.replace(`output_${session}.`, '');
+        return {
+          name: cleanName.startsWith(ext) ? cleanName : `${ext}.${cleanName}`,
+          data: new Uint8Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength)),
+          size: raw.byteLength,
+        };
+      });
+
+      return {
+        mainData: volumes[0].data,
+        volumes,
+        verified,
+      };
+    }
+
+    // Single archive file
+    const targetFile = `/${rootFiles[0]}`;
+    const outBytes = FS.readFile(targetFile);
     const finalBuffer = new Uint8Array(
       outBytes.buffer.slice(outBytes.byteOffset, outBytes.byteOffset + outBytes.byteLength)
     );
 
-    return finalBuffer;
+    return {
+      mainData: finalBuffer,
+      verified,
+    };
   } finally {
     // Cleanup MEMFS
     try {
@@ -322,7 +424,14 @@ export async function create7zArchive(
       // ignore
     }
     try {
-      FS.unlink(outArchive);
+      const generated = FS.readdir('/').filter((f: string) => f.startsWith(`output_${session}`));
+      for (const gf of generated) {
+        try {
+          FS.unlink(`/${gf}`);
+        } catch {
+          // ignore
+        }
+      }
     } catch {
       // ignore
     }
