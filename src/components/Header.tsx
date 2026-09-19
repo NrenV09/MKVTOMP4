@@ -3,6 +3,7 @@ import { Terminal, Trash2, Cpu, Zap, HardDrive, ShieldCheck } from 'lucide-react
 import { HardwareCapabilities } from '../utils/hardwareEngine';
 import { WasmCacheStats } from '../utils/wasmCache';
 import { ComplianceTab } from './ComplianceModal';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface HeaderProps {
   engineReady: boolean;
@@ -90,6 +91,8 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Right: Actions & Cache Info */}
       <div className="flex items-center gap-2">
+        <PWAInstallButton />
+
         {wasmCacheStats && wasmCacheStats.itemCount > 0 && (
           <div
             className="hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-950/80 border border-zinc-800/80 font-mono text-[11px] text-zinc-300"

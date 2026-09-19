@@ -9,7 +9,17 @@
     <meta property="og:description" content="Universal WebAssembly media converter and remuxing workstation supporting all video, audio, and container formats from Files and local storage with zero server uploads." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
-    <script src="coi-serviceworker.js"></script>
+
+    <!-- PWA & Mobile Installability Meta Tags -->
+    <meta name="theme-color" content="#0c0c0e" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="MKV to MP4" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/pwa-192x192.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
   </head>
   <body>
     <div id="root"></div>

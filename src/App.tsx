@@ -60,6 +60,7 @@ import { ResultPanel } from './components/ResultPanel';
 import { TerminalDock } from './components/TerminalDock';
 import { Footer } from './components/Footer';
 import { ComplianceModal, ComplianceTab } from './components/ComplianceModal';
+import { OfflineIndicator } from './components/OfflineIndicator';
 
 const DEFAULT_CONFIG: EncodingConfig = {
   targetCategory: 'video',
@@ -645,7 +646,7 @@ export default function App() {
 
         const outputData = await ffmpeg.readFile(virtualOut);
         const mimeType = getMimeType(config.container);
-        outputBlob = new Blob([(outputData as Uint8Array).buffer], { type: mimeType });
+        outputBlob = new Blob([outputData as Uint8Array], { type: mimeType });
       } else if (canHardwareWebCodecs) {
         // WEBGPU & WEBCODECS HARDWARE ACCELERATION
         setTelemetry((prev) => ({
@@ -663,7 +664,7 @@ export default function App() {
           const remuxCode = await ffmpeg.exec(remuxArgs);
           if (remuxCode === 0) {
             const remuxData = await ffmpeg.readFile(tempRemuxOut);
-            sourceBlobForHw = new Blob([(remuxData as Uint8Array).buffer], { type: 'video/mp4' });
+            sourceBlobForHw = new Blob([remuxData as Uint8Array], { type: 'video/mp4' });
             try { await ffmpeg.deleteFile(tempRemuxOut); } catch {}
           }
         }
@@ -725,7 +726,7 @@ export default function App() {
           }
           const outputData = await ffmpeg.readFile(virtualOut);
           const mimeType = getMimeType(config.container);
-          outputBlob = new Blob([(outputData as Uint8Array).buffer], { type: mimeType });
+          outputBlob = new Blob([outputData as Uint8Array], { type: mimeType });
         }
       } else {
         // MULTI-THREADED CPU WASM
@@ -743,7 +744,7 @@ export default function App() {
         }
         const outputData = await ffmpeg.readFile(virtualOut);
         const mimeType = getMimeType(config.container);
-        outputBlob = new Blob([(outputData as Uint8Array).buffer], { type: mimeType });
+        outputBlob = new Blob([outputData as Uint8Array], { type: mimeType });
       }
 
       // Unlink input file immediately to free virtual memory before loading output
@@ -1012,6 +1013,9 @@ export default function App() {
         onClose={() => setComplianceOpen(false)}
         defaultTab={complianceTab}
       />
+
+      {/* Real-time Offline Connectivity Status Indicator */}
+      <OfflineIndicator />
     </div>
   );
 }
