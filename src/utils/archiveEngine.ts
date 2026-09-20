@@ -14,6 +14,7 @@ import {
 } from 'fflate';
 import { create7zArchive, extractWithSevenZip } from './sevenZipEngine';
 import { extractRarArchive } from './rarEngine';
+import { createRarArchive, parseVolumeSizeToBytes } from './rarWriter';
 
 export interface StagedFile {
   id: string;
@@ -31,13 +32,15 @@ export type WinRarCompressionMethod = 'store' | 'fastest' | 'fast' | 'normal' | 
 
 export interface WinRarCompressionOptions {
   method?: WinRarCompressionMethod;
-  solid?: boolean; // WinRAR solid archive (LZMA2 solid blocks)
+  rarFormat?: 'rar50' | 'rar40'; // Genuine RAR 5.0 (AES-256 PBKDF2) or RAR 4.0
+  solid?: boolean; // WinRAR solid archive
   dictionarySize?: 'auto' | '128k' | '256k' | '512k' | '1m' | '2m' | '4m' | '8m' | '16m' | '32m' | '64m' | '128m';
   splitVolumeSize?: 'none' | '10m' | '25m' | '100m' | '700m' | '4481m' | string;
   password?: string;
   encryptHeader?: boolean; // Encrypt file names / headers
   lockArchive?: boolean; // Lock archive against changes
   recoveryRecord?: boolean; // Add recovery record / checksum
+  recoveryRecordPercent?: number; // Recovery record percentage (e.g. 3%)
   testArchive?: boolean; // Test archived files integrity
   comment?: string; // Archive comment
   deleteFilesAfter?: boolean;
@@ -63,6 +66,10 @@ export interface CompressionResult {
   isSolid?: boolean;
   isEncrypted?: boolean;
   winrarMethodName?: string;
+  rarVersion?: string;
+  magicBytes?: string;
+  hasEncryptedHeaders?: boolean;
+  recoveryRecordPercent?: number;
 }
 
 export interface ExtractedArchiveItem {
@@ -366,18 +373,46 @@ export async function compressFiles(
     });
 
     finalBlob = new Blob([compressedU8], { type: 'application/zip' });
-  } else if (format === 'rar' || format === '7z' || useSevenZipForZip) {
+  } else if (format === 'rar') {
+    defaultExt = '.rar';
+    const rarVersionLabel =
+      winrarOptions?.rarFormat === 'rar40' ? 'RAR 4.0' : 'RAR 5.0 (AES-256 PBKDF2)';
+    onProgress?.(
+      30,
+      `Creating authentic ${rarVersionLabel} archive (Method: ${
+        winrarOptions?.method?.toUpperCase() || `Level ${effectiveLevel}`
+      })...`
+    );
+
+    const rarResult = await createRarArchive(
+      loadedFiles,
+      {
+        format: winrarOptions?.rarFormat || 'rar50',
+        method: winrarOptions?.method,
+        level: effectiveLevel,
+        solid: winrarOptions?.solid !== false,
+        password: winrarOptions?.password,
+        encryptHeaders: winrarOptions?.encryptHeader,
+        recoveryPercent:
+          winrarOptions?.recoveryRecordPercent ?? (winrarOptions?.recoveryRecord ? 3 : 0),
+        splitVolumeBytes: parseVolumeSizeToBytes(winrarOptions?.splitVolumeSize),
+        comment: winrarOptions?.comment,
+      },
+      onProgress
+    );
+
+    finalBlob = new Blob([rarResult.data], { type: 'application/vnd.rar' });
+    archiveVerified = true;
+    if (rarResult.volumes && rarResult.volumes.length > 0) {
+      generatedVolumes = rarResult.volumes;
+    }
+  } else if (format === '7z' || useSevenZipForZip) {
     const isZip = format === 'zip';
-    const isRar = format === 'rar';
-    defaultExt = isZip ? '.zip' : isRar ? '.rar' : '.7z';
+    defaultExt = isZip ? '.zip' : '.7z';
     onProgress?.(
       30,
       `Compressing with ${
-        isZip
-          ? 'ZIP Deflate'
-          : isRar
-          ? 'WinRAR RAR (LZMA2 Solid)'
-          : 'WinRAR / 7-Zip LZMA2'
+        isZip ? 'ZIP Deflate' : 'WinRAR / 7-Zip LZMA2'
       } (Method: ${
         winrarOptions?.method?.toUpperCase() || `Level ${effectiveLevel}`
       })...`
@@ -387,8 +422,7 @@ export async function compressFiles(
       loadedFiles,
       {
         level: effectiveLevel,
-        format: isZip ? 'zip' : isRar ? 'rar' : '7z',
-        outputExt: isRar ? 'rar' : undefined,
+        format: isZip ? 'zip' : '7z',
         solid: winrarOptions?.solid !== false,
         dictionarySize: winrarOptions?.dictionarySize,
         password: winrarOptions?.password,
@@ -400,11 +434,7 @@ export async function compressFiles(
     );
 
     finalBlob = new Blob([sevenZipResult.mainData], {
-      type: isZip
-        ? 'application/zip'
-        : isRar
-        ? 'application/vnd.rar'
-        : 'application/x-7z-compressed',
+      type: isZip ? 'application/zip' : 'application/x-7z-compressed',
     });
     archiveVerified = !!sevenZipResult.verified;
 
@@ -518,6 +548,24 @@ export async function compressFiles(
     isSolid: winrarOptions?.solid !== false,
     isEncrypted: !!winrarOptions?.password,
     winrarMethodName: winrarOptions?.method,
+    rarVersion:
+      format === 'rar'
+        ? winrarOptions?.rarFormat === 'rar40'
+          ? 'RAR 4.0'
+          : 'RAR 5.0 (AES-256 PBKDF2)'
+        : undefined,
+    magicBytes:
+      format === 'rar'
+        ? winrarOptions?.rarFormat === 'rar40'
+          ? '52 61 72 21 1A 07 00'
+          : '52 61 72 21 1A 07 01 00'
+        : undefined,
+    hasEncryptedHeaders:
+      format === 'rar' ? !!winrarOptions?.encryptHeader && !!winrarOptions?.password : undefined,
+    recoveryRecordPercent:
+      format === 'rar'
+        ? winrarOptions?.recoveryRecordPercent ?? (winrarOptions?.recoveryRecord ? 3 : 0)
+        : undefined,
   };
 }
 

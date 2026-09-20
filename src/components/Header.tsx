@@ -56,21 +56,16 @@ export const Header: React.FC<HeaderProps> = ({
             />
             <span>
               {engineReady
-                ? `In-App Engine Ready (${engineMode === 'mt' ? 'Multi-Thread' : 'Standard'} · Offline)`
+                ? 'Offline Ready'
                 : engineLoading
-                ? 'Loading in-app binaries...'
+                ? 'Loading engine...'
                 : 'Offline'}
             </span>
-            {engineReady && (
-              <span className="hidden sm:inline-block px-1.5 py-0.5 rounded bg-emerald-950/60 border border-emerald-800/60 text-[10px] text-emerald-300 font-medium ml-1">
-                Zero-Network
-              </span>
-            )}
           </div>
         </div>
       </div>
 
-      {/* Center: Workspace Mode Switcher (Beside each other) */}
+      {/* Center: Workspace Mode Switcher */}
       {onSelectWorkspace && (
         <div className="flex items-center p-1 rounded-xl bg-zinc-950 border border-zinc-800/90 shadow-inner">
           <button
@@ -80,10 +75,9 @@ export const Header: React.FC<HeaderProps> = ({
                 ? 'bg-emerald-500 text-zinc-950 shadow-sm'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60'
             }`}
-            title="Video & Audio converter (MKV to MP4, codecs, remuxing)"
           >
             <Film className="w-3.5 h-3.5" />
-            <span>Media Converter</span>
+            <span>Media</span>
           </button>
 
           <button
@@ -93,10 +87,9 @@ export const Header: React.FC<HeaderProps> = ({
                 ? 'bg-emerald-500 text-zinc-950 shadow-sm'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60'
             }`}
-            title="File compressor & archive decompressor (ZIP, TAR.GZ, GZ)"
           >
             <Archive className="w-3.5 h-3.5" />
-            <span>File Compressor & Decompressor</span>
+            <span>Compressor</span>
           </button>
 
           <button
@@ -106,36 +99,10 @@ export const Header: React.FC<HeaderProps> = ({
                 ? 'bg-emerald-500 text-zinc-950 shadow-sm'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60'
             }`}
-            title="View Media Converter and File Compressor side-by-side"
           >
             <Columns2 className="w-3.5 h-3.5" />
-            <span>Side-by-Side</span>
+            <span>Split View</span>
           </button>
-        </div>
-      )}
-
-      {/* Middle: WebGPU & Hardware Acceleration Status */}
-      {hardwareCaps && (
-        <div className="hidden 2xl:flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-zinc-950/80 border border-zinc-800/80 font-mono text-[11px]">
-          <div className="flex items-center gap-1.5">
-            <Cpu className={`w-3.5 h-3.5 ${hardwareCaps.webgpu.available ? 'text-emerald-400' : 'text-zinc-500'}`} />
-            <span className="text-zinc-400">WebGPU:</span>
-            <span className={hardwareCaps.webgpu.available ? 'text-emerald-300 font-semibold' : 'text-zinc-500'}>
-              {hardwareCaps.webgpu.available
-                ? hardwareCaps.webgpu.adapterName.replace('Apple ', '').replace(' Corporation', '') || 'Active'
-                : 'Inactive'}
-            </span>
-          </div>
-          <span className="text-zinc-700">|</span>
-          <div className="flex items-center gap-1.5">
-            <Zap className="w-3.5 h-3.5 text-amber-400" />
-            <span className="text-zinc-400">Acceleration:</span>
-            <span className="text-amber-300 font-semibold">
-              {hardwareCaps.webcodecs.hwH264 || hardwareCaps.webcodecs.hwHEVC
-                ? 'Hardware Media Engine'
-                : 'Direct Stream Copy'}
-            </span>
-          </div>
         </div>
       )}
 
@@ -146,33 +113,18 @@ export const Header: React.FC<HeaderProps> = ({
         {wasmCacheStats && wasmCacheStats.itemCount > 0 && (
           <div
             className="hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-950/80 border border-zinc-800/80 font-mono text-[11px] text-zinc-300"
-            title={`WebAssembly FFmpeg engine is stored in browser cache: ${wasmCacheStats.itemCount} files (${wasmCacheStats.formattedSize})`}
           >
             <HardDrive className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="text-zinc-400">Wasm Cache:</span>
+            <span className="text-zinc-400">Cache:</span>
             <span className="text-cyan-300 font-medium">{wasmCacheStats.formattedSize}</span>
-            <span className="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>
           </div>
-        )}
-
-        {onOpenCompliance && (
-          <button
-            onClick={() => onOpenCompliance('privacy')}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-emerald-400 border-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
-            title="Privacy, Terms, Cookies & Legal details"
-            aria-label="View Privacy, Terms, Cookies and Compliance details"
-          >
-            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-            <span className="hidden sm:inline">Privacy & Legal</span>
-          </button>
         )}
 
         {onPurgeCache && (
           <button
             onClick={onPurgeCache}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 border-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
-            title="Reset active media buffers (WebAssembly engine stays safely cached)"
-            aria-label="Reset active media buffers"
+            title="Reset"
           >
             <Trash2 className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">Reset</span>

@@ -171,11 +171,8 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
       <div className="bg-gradient-to-r from-zinc-800 via-zinc-850 to-zinc-800 px-3.5 py-2.5 flex items-center justify-between border-b border-zinc-700 select-none">
         <div className="flex items-center gap-2.5">
           <WinRarBooksIcon className="w-5 h-5 drop-shadow" />
-          <span className="font-semibold text-xs tracking-wide text-zinc-100 flex items-center gap-1.5">
-            <span>Archive name and parameters</span>
-            <span className="text-[10px] text-zinc-400 font-mono font-normal">
-              (WinRAR Compression Style)
-            </span>
+          <span className="font-semibold text-xs tracking-wide text-zinc-100">
+            Archive name and parameters
           </span>
         </div>
 
@@ -339,18 +336,68 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
                       <span>TAR.GZ</span>
                     </label>
                   </div>
-                  <div className="text-[10px] text-zinc-400 mt-2 flex items-center gap-1.5">
-                    <span className="text-emerald-400 font-bold">✓</span>
-                    <span>
-                      {format === 'rar'
-                        ? 'Creates a solid WinRAR-compatible .rar archive with high-density LZMA2 packing and AES-256 support.'
-                        : format === '7z'
-                        ? 'Open 7-Zip LZMA2 archive with solid continuous data blocks.'
-                        : format === 'zip'
-                        ? 'Universal ZIP container compatible with all default OS tools.'
-                        : 'UNIX tarball compressed with Gzip stream.'}
-                    </span>
-                  </div>
+
+                  {/* Authentic RAR Version Selector (When format === 'rar') */}
+                  {format === 'rar' && (
+                    <div className="mt-2.5 p-2.5 rounded-lg bg-emerald-950/30 border border-emerald-500/30 space-y-2">
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="font-semibold text-emerald-300 flex items-center gap-1.5">
+                          <Shield className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>RAR Container Specification</span>
+                        </span>
+                        <span className="text-[10px] text-emerald-400/80 font-mono">
+                          Magic: {winrarOptions.rarFormat === 'rar40' ? '52 61 72 21 1A 07 00' : '52 61 72 21 1A 07 01 00'}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 text-xs">
+                        <label
+                          className={`flex items-start gap-2 p-2 rounded-lg border cursor-pointer transition-all ${
+                            winrarOptions.rarFormat !== 'rar40'
+                              ? 'bg-emerald-950/70 border-emerald-500 text-emerald-200'
+                              : 'bg-zinc-900/80 border-zinc-800 text-zinc-400'
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="rarSpecification"
+                            checked={winrarOptions.rarFormat !== 'rar40'}
+                            onChange={() => setWinrarOptions((prev) => ({ ...prev, rarFormat: 'rar50' }))}
+                            className="accent-emerald-500 mt-0.5"
+                          />
+                          <div className="min-w-0">
+                            <div className="font-semibold text-[11px] text-zinc-100">RAR 5.0 (Default)</div>
+                            <div className="text-[10px] text-zinc-400">AES-256 PBKDF2 & Reed-Solomon</div>
+                          </div>
+                        </label>
+
+                        <label
+                          className={`flex items-start gap-2 p-2 rounded-lg border cursor-pointer transition-all ${
+                            winrarOptions.rarFormat === 'rar40'
+                              ? 'bg-emerald-950/70 border-emerald-500 text-emerald-200'
+                              : 'bg-zinc-900/80 border-zinc-800 text-zinc-400'
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="rarSpecification"
+                            checked={winrarOptions.rarFormat === 'rar40'}
+                            onChange={() => setWinrarOptions((prev) => ({ ...prev, rarFormat: 'rar40' }))}
+                            className="accent-emerald-500 mt-0.5"
+                          />
+                          <div className="min-w-0">
+                            <div className="font-semibold text-[11px] text-zinc-100">RAR 4.x (Legacy)</div>
+                            <div className="text-[10px] text-zinc-400">Older WinRAR compatibility</div>
+                          </div>
+                        </label>
+                      </div>
+
+                      <div className="text-[10px] text-zinc-300 flex items-center gap-1.5 pt-0.5">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        <span>Genuine RAR container. Unopenable if renamed to .zip.</span>
+                      </div>
+                    </div>
+                  )}
                 </fieldset>
 
                 {/* Compression Method */}
@@ -368,21 +415,18 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
                     }
                     className="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-700 text-xs text-zinc-200 font-mono focus:border-emerald-500 focus:outline-none"
                   >
-                    <option value="store">Store (No compression / Instant)</option>
-                    <option value="fastest">Fastest (Lowest CPU usage)</option>
-                    <option value="fast">Fast (Quick archiving)</option>
-                    <option value="normal">Normal (WinRAR default)</option>
-                    <option value="good">Good (High ratio)</option>
-                    <option value="best">Best (Maximum solid compression)</option>
+                    <option value="store">Store</option>
+                    <option value="fastest">Fastest</option>
+                    <option value="fast">Fast</option>
+                    <option value="normal">Normal</option>
+                    <option value="good">Good</option>
+                    <option value="best">Best</option>
                   </select>
                 </div>
 
                 {/* Dictionary Size */}
                 <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="font-semibold text-zinc-300">Dictionary size</label>
-                    <span className="text-[10px] text-zinc-500">Larger = better ratio on repeat data</span>
-                  </div>
+                  <label className="block font-semibold text-zinc-300 mb-1">Dictionary size</label>
                   <select
                     value={winrarOptions.dictionarySize || '16m'}
                     onChange={(e) =>
@@ -394,18 +438,18 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
                     disabled={format === 'zip'}
                     className="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-700 text-xs text-zinc-200 font-mono focus:border-emerald-500 focus:outline-none disabled:opacity-50"
                   >
-                    <option value="auto">Auto (Adaptive)</option>
+                    <option value="auto">Auto</option>
                     <option value="128k">128 KB</option>
                     <option value="256k">256 KB</option>
                     <option value="512k">512 KB</option>
                     <option value="1m">1 MB</option>
                     <option value="2m">2 MB</option>
-                    <option value="4m">4 MB (Fast default)</option>
+                    <option value="4m">4 MB</option>
                     <option value="8m">8 MB</option>
-                    <option value="16m">16 MB (WinRAR standard)</option>
-                    <option value="32m">32 MB (High ratio)</option>
-                    <option value="64m">64 MB (Ultra ratio)</option>
-                    <option value="128m">128 MB (Maximum)</option>
+                    <option value="16m">16 MB</option>
+                    <option value="32m">32 MB</option>
+                    <option value="64m">64 MB</option>
+                    <option value="128m">128 MB</option>
                   </select>
                 </div>
               </div>
@@ -427,7 +471,7 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
                         }
                         className="rounded accent-emerald-500 w-3.5 h-3.5"
                       />
-                      <span>Create solid archive (Continuous block packing)</span>
+                      <span>Create solid archive</span>
                     </label>
 
                     <label className="flex items-center gap-2 text-zinc-300 hover:text-zinc-100 cursor-pointer">
@@ -439,20 +483,42 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
                         }
                         className="rounded accent-emerald-500 w-3.5 h-3.5"
                       />
-                      <span>Test archived files (Integrity self-test)</span>
+                      <span>Test archived files</span>
                     </label>
 
-                    <label className="flex items-center gap-2 text-zinc-300 hover:text-zinc-100 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={!!winrarOptions.recoveryRecord}
-                        onChange={(e) =>
-                          setWinrarOptions((prev) => ({ ...prev, recoveryRecord: e.target.checked }))
-                        }
-                        className="rounded accent-emerald-500 w-3.5 h-3.5"
-                      />
-                      <span>Put recovery record / CRC32 protection</span>
-                    </label>
+                    <div className="space-y-1">
+                      <label className="flex items-center gap-2 text-zinc-300 hover:text-zinc-100 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={!!winrarOptions.recoveryRecord}
+                          onChange={(e) =>
+                            setWinrarOptions((prev) => ({ ...prev, recoveryRecord: e.target.checked }))
+                          }
+                          className="rounded accent-emerald-500 w-3.5 h-3.5"
+                        />
+                        <span>Put recovery record (Reed-Solomon)</span>
+                      </label>
+                      {winrarOptions.recoveryRecord && (
+                        <div className="ml-5 flex items-center gap-2 text-[11px] text-zinc-400">
+                          <span>Size:</span>
+                          <select
+                            value={winrarOptions.recoveryRecordPercent ?? 3}
+                            onChange={(e) =>
+                              setWinrarOptions((prev) => ({
+                                ...prev,
+                                recoveryRecordPercent: parseInt(e.target.value, 10),
+                              }))
+                            }
+                            className="px-2 py-0.5 rounded bg-zinc-950 border border-zinc-700 text-zinc-200 text-[11px] font-mono focus:border-emerald-500 focus:outline-none"
+                          >
+                            <option value={1}>1% (Basic protection)</option>
+                            <option value={3}>3% (WinRAR recommended)</option>
+                            <option value={5}>5% (Medium redundancy)</option>
+                            <option value={10}>10% (High protection)</option>
+                          </select>
+                        </div>
+                      )}
+                    </div>
 
                     <label className="flex items-center gap-2 text-zinc-300 hover:text-zinc-100 cursor-pointer">
                       <input
@@ -463,7 +529,7 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
                         }
                         className="rounded accent-emerald-500 w-3.5 h-3.5"
                       />
-                      <span>Lock archive (Protect from modifications)</span>
+                      <span>Lock archive</span>
                     </label>
 
                     <label className="flex items-center gap-2 text-zinc-300 hover:text-zinc-100 cursor-pointer">
@@ -475,7 +541,7 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
                         }
                         className="rounded accent-emerald-500 w-3.5 h-3.5"
                       />
-                      <span>Delete staged files after archiving</span>
+                      <span>Delete files after archiving</span>
                     </label>
                   </div>
                 </fieldset>
@@ -495,12 +561,12 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
                     }
                     className="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-700 text-xs text-zinc-200 font-mono focus:border-emerald-500 focus:outline-none"
                   >
-                    <option value="none">None (Single file)</option>
+                    <option value="none">None</option>
                     <option value="10m">10 MB</option>
-                    <option value="25m">25 MB (Discord attachment limit)</option>
-                    <option value="100m">100 MB (Web upload limit)</option>
-                    <option value="700m">700 MB (CD)</option>
-                    <option value="4481m">4.37 GB (DVD)</option>
+                    <option value="25m">25 MB</option>
+                    <option value="100m">100 MB</option>
+                    <option value="700m">700 MB</option>
+                    <option value="4481m">4.37 GB</option>
                   </select>
                 </div>
 
@@ -518,7 +584,7 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
                     <Key className="w-3.5 h-3.5" />
                     <span>
                       {winrarOptions.password
-                        ? 'Password Protected (AES-256 Active)'
+                        ? 'Password Protected'
                         : 'Set password...'}
                     </span>
                   </button>
@@ -534,11 +600,8 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
             <div className="p-4 rounded-xl bg-zinc-900/60 border border-zinc-800 space-y-3">
               <h4 className="font-semibold text-sm text-zinc-100 flex items-center gap-2">
                 <Database className="w-4 h-4 text-emerald-400" />
-                <span>Memory and Compression Parameters</span>
+                <span>Memory & Parameters</span>
               </h4>
-              <p className="text-zinc-400 text-xs">
-                Solid archiving groups all staged files together into an unbroken data stream. This allows the LZMA2 dictionary to reuse patterns between different files (such as source code, logs, or documents) achieving up to 30-70% higher compression ratios than standard ZIP.
-              </p>
 
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 pt-2 text-xs font-mono">
                 <div className="p-2.5 rounded-lg bg-zinc-950 border border-zinc-800">
@@ -731,7 +794,7 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
                 />
               </div>
 
-              <div className="space-y-1.5 pt-1">
+              <div className="space-y-2 pt-1">
                 <label className="flex items-center gap-2 text-zinc-300 cursor-pointer">
                   <input
                     type="checkbox"
@@ -742,15 +805,30 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
                   <span>Show password</span>
                 </label>
 
-                <label className="flex items-center gap-2 text-zinc-300 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={pwdEncryptNames}
-                    onChange={(e) => setPwdEncryptNames(e.target.checked)}
-                    className="rounded accent-emerald-500 w-3.5 h-3.5"
-                  />
-                  <span>Encrypt file names / headers (AES-256)</span>
-                </label>
+                <div className="space-y-1">
+                  <label className="flex items-center gap-2 text-zinc-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={pwdEncryptNames}
+                      onChange={(e) => setPwdEncryptNames(e.target.checked)}
+                      className="rounded accent-emerald-500 w-3.5 h-3.5"
+                    />
+                    <span className="font-medium text-emerald-300">Encrypt file names (RAR 5.0 AES-256)</span>
+                  </label>
+                  <p className="text-[10px] text-zinc-400 pl-5.5 leading-relaxed">
+                    Hides file names, sizes, and folder structure. Unauthorized users cannot inspect archive contents without entering the password.
+                  </p>
+                </div>
+
+                <div className="p-2.5 rounded-lg bg-zinc-900/90 border border-zinc-800 text-[11px] space-y-1">
+                  <div className="flex items-center gap-1.5 text-zinc-200 font-semibold">
+                    <Shield className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>WinRAR AES-256 Encryption</span>
+                  </div>
+                  <p className="text-[10px] text-zinc-400 leading-normal">
+                    WinRAR applies 256-bit AES cipher with PBKDF2 (HMAC-SHA256) key derivation to prevent brute-force attacks.
+                  </p>
+                </div>
               </div>
             </div>
 
@@ -906,42 +984,46 @@ export const WinRarDialog: React.FC<WinRarDialogProps> = ({
               </button>
             </div>
 
-            <div className="space-y-3 text-xs text-zinc-300 max-h-80 overflow-y-auto pr-1">
+            <div className="space-y-3.5 text-xs text-zinc-300 max-h-96 overflow-y-auto pr-1">
               <div>
-                <h5 className="font-semibold text-emerald-400">WinRAR RAR (.rar) Format</h5>
-                <p className="text-zinc-400 mt-0.5">
-                  Selecting <strong>RAR</strong> packages your files into a solid continuous LZMA2-compressed <code>.rar</code> container. This archive is 100% compatible with <strong>WinRAR</strong>, <strong>7-Zip</strong>, <strong>PeaZip</strong>, and our built-in Decompressor.
+                <h5 className="font-semibold text-emerald-400">Which Encryption Technology Does WinRAR Use?</h5>
+                <p className="text-zinc-400 mt-0.5 leading-relaxed">
+                  WinRAR uses <strong>AES-256 Bit Encryption</strong> (Advanced Encryption Standard, also known as the Rijndael cipher developed by Vincent Rijmen and Joan Daemen and adopted by NIST in 2001). It provides military-grade data protection against brute-force attacks.
                 </p>
               </div>
 
               <div>
-                <h5 className="font-semibold text-emerald-400">Solid Archiving</h5>
-                <p className="text-zinc-400 mt-0.5">
-                  In solid mode, all files are treated as a single continuous data block. This delivers dramatic compression improvements when archiving collections of similar files (e.g. source code, text documents, or repetitive data).
+                <h5 className="font-semibold text-emerald-400">How Has WinRAR Encryption Improved with RAR 5.0?</h5>
+                <p className="text-zinc-400 mt-0.5 leading-relaxed">
+                  In RAR 5.0, the key derivation function is upgraded to <strong>PBKDF2 using HMAC-SHA256</strong>. It also incorporates a 128-bit password verification hash directly in headers, enabling immediate validation without unpacking the full archive data.
                 </p>
               </div>
 
               <div>
-                <h5 className="font-semibold text-emerald-400">Compression Methods</h5>
-                <ul className="list-disc pl-4 space-y-1 text-zinc-400 mt-1">
-                  <li><strong>Store:</strong> Zero compression, lightning fast packing into single archive.</li>
-                  <li><strong>Fastest / Fast:</strong> Lower compression, ideal for quick archives.</li>
-                  <li><strong>Normal:</strong> The standard WinRAR algorithm balance.</li>
-                  <li><strong>Best:</strong> Maximum solid LZMA2 passes for the smallest possible archive size.</li>
-                </ul>
-              </div>
-
-              <div>
-                <h5 className="font-semibold text-emerald-400">Split to Volumes</h5>
-                <p className="text-zinc-400 mt-0.5">
-                  Generates numbered parts (.001, .002, etc.) each restricted to your selected file size. These parts can be extracted using WinRAR or the in-app Archive Decompressor.
+                <h5 className="font-semibold text-emerald-400">What is "Encrypt File Names"?</h5>
+                <p className="text-zinc-400 mt-0.5 leading-relaxed">
+                  When enabled, all file metadata including file names, file sizes, and directory structures are encrypted with AES-256. Anyone without the password cannot view the names or contents of the archived files.
                 </p>
               </div>
 
               <div>
-                <h5 className="font-semibold text-emerald-400">Privacy & Performance</h5>
-                <p className="text-zinc-400 mt-0.5">
-                  All compression runs directly inside your device's browser memory using WebAssembly. No files are ever sent to any external server.
+                <h5 className="font-semibold text-emerald-400">How Does the Recovery Record Feature Work?</h5>
+                <p className="text-zinc-400 mt-0.5 leading-relaxed">
+                  RAR 5.0 uses <strong>Reed-Solomon error-correcting codes</strong>. If an archive suffers data corruption or missing sectors, the recovery record can reconstruct the damaged data up to the chosen percentage (default 3%).
+                </p>
+              </div>
+
+              <div>
+                <h5 className="font-semibold text-emerald-400">Authentic RAR Container Specification</h5>
+                <p className="text-zinc-400 mt-0.5 leading-relaxed">
+                  Our compression engine outputs authentic RAR archives with true magic signatures (<code>Rar!\x1a\x07\x01\x00</code> for RAR 5.0 and <code>Rar!\x1a\x07\x00</code> for RAR 4.0). Unlike renamed ZIP files, these are authentic RAR bitstreams that strictly require a RAR decompressor.
+                </p>
+              </div>
+
+              <div>
+                <h5 className="font-semibold text-emerald-400">Solid Archiving & Compression Methods</h5>
+                <p className="text-zinc-400 mt-0.5 leading-relaxed">
+                  Solid archives treat multiple files as a continuous data stream, maximizing compression for collections of similar files. Methods range from <strong>Store</strong> (0% CPU, lightning pack) to <strong>Best</strong> (maximum compression passes).
                 </p>
               </div>
             </div>

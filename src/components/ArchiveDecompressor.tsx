@@ -166,14 +166,6 @@ export const ArchiveDecompressor: React.FC = () => {
 
   return (
     <div className="space-y-5">
-      {/* Privacy Guarantee Note */}
-      <div className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-emerald-950/30 border border-emerald-800/40 text-xs text-emerald-300">
-        <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
-        <span>
-          <strong>100% Private Decompression:</strong> Archive extraction operates purely within client-side memory. No files are ever uploaded to any cloud server.
-        </span>
-      </div>
-
       {/* Initial Dropzone */}
       {!result && (
         <div
@@ -216,13 +208,13 @@ export const ArchiveDecompressor: React.FC = () => {
           </div>
 
           <h3 className="mt-4 text-base font-semibold text-zinc-100">
-            Choose or drop an archive to decompress
+            Choose or drop archive to extract
           </h3>
-          <p className="mt-1 text-xs text-zinc-400 max-w-md mx-auto">
-            Supports <strong className="text-zinc-200">.7Z</strong> (7-Zip), <strong className="text-zinc-200">.RAR</strong> (RAR4/RAR5), <strong className="text-zinc-200">.ZIP</strong>, <strong className="text-zinc-200">.TAR.GZ</strong>, <strong className="text-zinc-200">.TGZ</strong>, <strong className="text-zinc-200">.TAR</strong>, and <strong className="text-zinc-200">.GZ</strong> archives.
+          <p className="mt-1 text-xs text-zinc-400">
+            Supports RAR, 7Z, ZIP, TAR.GZ
           </p>
 
-          <div className="mt-5 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold text-xs transition-colors shadow-md">
+          <div className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold text-xs transition-colors shadow-md">
             <Upload className="w-3.5 h-3.5" />
             <span>Select Archive</span>
           </div>
@@ -238,12 +230,9 @@ export const ArchiveDecompressor: React.FC = () => {
           <div className="flex items-center gap-2.5 text-amber-400">
             <Lock className="w-5 h-5 shrink-0" />
             <span className="font-semibold text-sm">
-              Password-Protected Archive: {currentFile.name}
+              Password Protected: {currentFile.name}
             </span>
           </div>
-          <p className="text-xs text-zinc-400">
-            This archive requires a decryption password. Enter the password below to unpack its contents.
-          </p>
           <div className="flex items-center gap-2 pt-1">
             <div className="relative flex-1">
               <Key className="w-4 h-4 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />

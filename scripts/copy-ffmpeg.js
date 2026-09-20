@@ -25,6 +25,16 @@ const targets = [
     dest: path.join(root, 'public', 'rar', 'unrar.wasm'),
     isFile: true,
   },
+  {
+    src: path.join(root, 'node_modules', '@bitplane', 'rars', 'browser', 'wasm', 'rars_wasm_bg.wasm'),
+    dest: path.join(root, 'public', 'rars', 'rars_wasm_bg.wasm'),
+    isFile: true,
+  },
+  {
+    src: path.join(root, 'node_modules', '@bitplane', 'rars', 'browser', 'wasm', 'rars_wasm_bg.wasm'),
+    dest: path.join(root, 'public', 'rars_wasm_bg.wasm'),
+    isFile: true,
+  },
 ];
 
 for (const { src, dest, isFile } of targets) {
