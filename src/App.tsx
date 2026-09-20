@@ -84,7 +84,7 @@ const DEFAULT_CONFIG: EncodingConfig = {
 };
 
 export default function App() {
-  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('media');
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('compressor');
   const [engineReady, setEngineReady] = useState(false);
   const [engineLoading, setEngineLoading] = useState(false);
   const [engineError, setEngineError] = useState<string | null>(null);

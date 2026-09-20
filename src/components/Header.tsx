@@ -69,18 +69,6 @@ export const Header: React.FC<HeaderProps> = ({
       {onSelectWorkspace && (
         <div className="flex items-center p-1 rounded-xl bg-zinc-950 border border-zinc-800/90 shadow-inner">
           <button
-            onClick={() => onSelectWorkspace('media')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-              activeWorkspace === 'media'
-                ? 'bg-emerald-500 text-zinc-950 shadow-sm'
-                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60'
-            }`}
-          >
-            <Film className="w-3.5 h-3.5" />
-            <span>Media</span>
-          </button>
-
-          <button
             onClick={() => onSelectWorkspace('compressor')}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
               activeWorkspace === 'compressor'
@@ -93,32 +81,22 @@ export const Header: React.FC<HeaderProps> = ({
           </button>
 
           <button
-            onClick={() => onSelectWorkspace('split')}
-            className={`hidden xl:flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-              activeWorkspace === 'split'
+            onClick={() => onSelectWorkspace('media')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+              activeWorkspace === 'media'
                 ? 'bg-emerald-500 text-zinc-950 shadow-sm'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60'
             }`}
           >
-            <Columns2 className="w-3.5 h-3.5" />
-            <span>Split View</span>
+            <Film className="w-3.5 h-3.5" />
+            <span>Media</span>
           </button>
         </div>
       )}
 
-      {/* Right: Actions & Cache Info */}
+      {/* Right: Actions */}
       <div className="flex items-center gap-2">
         <PWAInstallButton />
-
-        {wasmCacheStats && wasmCacheStats.itemCount > 0 && (
-          <div
-            className="hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-950/80 border border-zinc-800/80 font-mono text-[11px] text-zinc-300"
-          >
-            <HardDrive className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="text-zinc-400">Cache:</span>
-            <span className="text-cyan-300 font-medium">{wasmCacheStats.formattedSize}</span>
-          </div>
-        )}
 
         {onPurgeCache && (
           <button

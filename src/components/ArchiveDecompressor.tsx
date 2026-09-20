@@ -198,23 +198,23 @@ export const ArchiveDecompressor: React.FC = () => {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".zip,.rar,.7z,.tar,.tar.gz,.tgz,.gz,.z,application/zip,application/x-tar,application/gzip,application/x-7z-compressed,application/vnd.rar,application/x-rar-compressed"
+            accept=".rar,.7z,.part1.rar,.r00,application/x-7z-compressed,application/vnd.rar,application/x-rar-compressed"
             className="hidden"
             onChange={(e) => handleArchiveSelected(e.target.files)}
           />
 
-          <div className="w-16 h-16 mx-auto rounded-2xl bg-zinc-800/80 border border-zinc-700/60 flex items-center justify-center text-emerald-400 group-hover:scale-105 transition-transform shadow-md">
-            <FolderArchive className="w-8 h-8" />
+          <div className="w-14 h-14 mx-auto rounded-2xl bg-zinc-800/80 border border-zinc-700/60 flex items-center justify-center text-emerald-400 group-hover:scale-105 transition-transform shadow-md">
+            <FolderArchive className="w-7 h-7" />
           </div>
 
           <h3 className="mt-4 text-base font-semibold text-zinc-100">
-            Choose or drop archive to extract
+            Drop archive here or browse
           </h3>
           <p className="mt-1 text-xs text-zinc-400">
-            Supports RAR, 7Z, ZIP, TAR.GZ
+            RAR or 7Z
           </p>
 
-          <div className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold text-xs transition-colors shadow-md">
+          <div className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold text-xs transition-colors shadow-md">
             <Upload className="w-3.5 h-3.5" />
             <span>Select Archive</span>
           </div>
@@ -342,29 +342,29 @@ export const ArchiveDecompressor: React.FC = () => {
               </div>
             </div>
 
-            {/* Quick Metrics */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <div className="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800/80">
-                <div className="text-[11px] text-zinc-400">Archive File Size</div>
-                <div className="text-sm font-semibold font-mono text-zinc-200 mt-0.5">
+            {/* Metrics */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+              <div className="p-2.5 rounded-xl bg-zinc-900/80 border border-zinc-800/80">
+                <div className="text-[10px] text-zinc-500">Archive Size</div>
+                <div className="text-xs font-semibold font-mono text-zinc-200 mt-0.5">
                   {formatBytes(result.archiveSize)}
                 </div>
               </div>
-              <div className="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800/80">
-                <div className="text-[11px] text-zinc-400">Uncompressed Size</div>
-                <div className="text-sm font-semibold font-mono text-emerald-400 mt-0.5">
+              <div className="p-2.5 rounded-xl bg-zinc-900/80 border border-zinc-800/80">
+                <div className="text-[10px] text-zinc-500">Uncompressed</div>
+                <div className="text-xs font-semibold font-mono text-emerald-400 mt-0.5">
                   {formatBytes(result.totalUncompressedSize)}
                 </div>
               </div>
-              <div className="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800/80">
-                <div className="text-[11px] text-zinc-400">Total Items</div>
-                <div className="text-sm font-semibold font-mono text-zinc-200 mt-0.5">
+              <div className="p-2.5 rounded-xl bg-zinc-900/80 border border-zinc-800/80">
+                <div className="text-[10px] text-zinc-500">Files</div>
+                <div className="text-xs font-semibold font-mono text-zinc-200 mt-0.5">
                   {result.files.length}
                 </div>
               </div>
-              <div className="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800/80">
-                <div className="text-[11px] text-zinc-400">Extract Time</div>
-                <div className="text-sm font-semibold font-mono text-zinc-200 mt-0.5">
+              <div className="p-2.5 rounded-xl bg-zinc-900/80 border border-zinc-800/80">
+                <div className="text-[10px] text-zinc-500">Time</div>
+                <div className="text-xs font-semibold font-mono text-zinc-200 mt-0.5">
                   {(result.elapsedMs / 1000).toFixed(2)}s
                 </div>
               </div>
@@ -403,7 +403,7 @@ export const ArchiveDecompressor: React.FC = () => {
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search files inside archive..."
+                  placeholder="Search files..."
                   className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500 transition-colors"
                 />
               </div>
@@ -413,7 +413,7 @@ export const ArchiveDecompressor: React.FC = () => {
             <div className="max-h-96 overflow-y-auto space-y-1.5 pr-1 divide-y divide-zinc-800/40">
               {filteredFiles.length === 0 ? (
                 <div className="text-center py-8 text-zinc-500 text-xs font-mono">
-                  No files match your search criteria.
+                  No files found.
                 </div>
               ) : (
                 filteredFiles.map((file) => (
