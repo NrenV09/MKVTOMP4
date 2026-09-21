@@ -1,6 +1,7 @@
 import { createExtractorFromData } from 'node-unrar-js';
 import { ExtractedArchiveItem, guessMimeType, getPreviewType } from './archiveEngine';
 import { extractWithSevenZip } from './sevenZipEngine';
+import { getComponentFromIDB, saveComponentToIDB } from './engineIndexedDBCache';
 
 let cachedUnrarWasmBinary: ArrayBuffer | null = null;
 
@@ -38,6 +39,19 @@ async function getUnrarWasmBinary(
     return cachedUnrarWasmBinary.slice(0);
   }
 
+  // 1. Try IndexedDB persistent cache first
+  try {
+    const idbComponent = await getComponentFromIDB('rar/unrar.wasm');
+    if (idbComponent && idbComponent.data && isValidWasm(idbComponent.data)) {
+      cachedUnrarWasmBinary = idbComponent.data;
+      onProgress?.(35, 'UnRAR WebAssembly core loaded from IndexedDB cache.');
+      return idbComponent.data.slice(0);
+    }
+  } catch (idbErr) {
+    console.warn('[rar-wasm] IndexedDB check error:', idbErr);
+  }
+
+  // 2. Try CacheStorage (and migrate to IndexedDB if found)
   const CACHE_NAME = 'archive-wasm-runtime-cache';
   if (typeof window !== 'undefined' && 'caches' in window) {
     try {
@@ -47,6 +61,7 @@ async function getUnrarWasmBinary(
         const buf = await matched.arrayBuffer();
         if (isValidWasm(buf)) {
           cachedUnrarWasmBinary = buf;
+          saveComponentToIDB('rar/unrar.wasm', buf.slice(0), 'application/wasm', 'UnRAR WebAssembly Core').catch(() => {});
           return buf.slice(0);
         }
       }
@@ -101,6 +116,15 @@ async function getUnrarWasmBinary(
     const buf = await fetchWasmCandidate(url);
     if (buf) {
       cachedUnrarWasmBinary = buf;
+
+      // 1. Persist to IndexedDB
+      try {
+        await saveComponentToIDB('rar/unrar.wasm', buf.slice(0), 'application/wasm', 'UnRAR WebAssembly Core');
+      } catch (idbSaveErr) {
+        console.warn('[rar-wasm] Failed to save to IndexedDB:', idbSaveErr);
+      }
+
+      // 2. Also persist to CacheStorage
       if (typeof window !== 'undefined' && 'caches' in window) {
         try {
           const cache = await window.caches.open(CACHE_NAME);

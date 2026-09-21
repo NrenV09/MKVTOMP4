@@ -1,5 +1,6 @@
 import SevenZip, { SevenZipModule } from '7z-wasm';
 import { ExtractedArchiveItem, guessMimeType, getPreviewType } from './archiveEngine';
+import { getComponentFromIDB, saveComponentToIDB } from './engineIndexedDBCache';
 
 let cached7zWasmBinary: ArrayBuffer | null = null;
 let cachedBlobUrl: string | null = null;
@@ -43,7 +44,19 @@ export async function get7zWasmBinary(
 
   onProgress?.(15, 'Locating 7-Zip WebAssembly core...');
 
-  // 1. Try CacheStorage first (if available and offline)
+  // 1. Try IndexedDB persistent cache first
+  try {
+    const idbComponent = await getComponentFromIDB('7z/7zz.wasm');
+    if (idbComponent && idbComponent.data && isValidWasm(idbComponent.data)) {
+      cached7zWasmBinary = idbComponent.data;
+      onProgress?.(40, '7-Zip WebAssembly core loaded from IndexedDB cache.');
+      return idbComponent.data.slice(0);
+    }
+  } catch (idbErr) {
+    console.warn('[7z-wasm] IndexedDB check error:', idbErr);
+  }
+
+  // 2. Try CacheStorage (and migrate to IndexedDB if present)
   const CACHE_NAME = 'archive-wasm-runtime-cache';
   if (typeof window !== 'undefined' && 'caches' in window) {
     try {
@@ -53,6 +66,7 @@ export async function get7zWasmBinary(
         const buf = await matched.arrayBuffer();
         if (isValidWasm(buf)) {
           cached7zWasmBinary = buf;
+          saveComponentToIDB('7z/7zz.wasm', buf.slice(0), 'application/wasm', '7-Zip WebAssembly Core').catch(() => {});
           return buf.slice(0);
         }
       }
@@ -61,7 +75,7 @@ export async function get7zWasmBinary(
     }
   }
 
-  // 2. Build candidate URLs
+  // 3. Build candidate URLs
   const candidates: string[] = [];
 
   // Vite base path
@@ -118,7 +132,14 @@ export async function get7zWasmBinary(
     if (buf) {
       cached7zWasmBinary = buf;
 
-      // Persist to CacheStorage for offline operation
+      // 1. Persist to IndexedDB for persistent offline operation
+      try {
+        await saveComponentToIDB('7z/7zz.wasm', buf.slice(0), 'application/wasm', '7-Zip WebAssembly Core');
+      } catch (idbSaveErr) {
+        console.warn('[7z-wasm] Failed to save to IndexedDB:', idbSaveErr);
+      }
+
+      // 2. Also persist to CacheStorage for redundancy
       if (typeof window !== 'undefined' && 'caches' in window) {
         try {
           const cache = await window.caches.open(CACHE_NAME);

@@ -226,9 +226,9 @@ export const ComplianceModal: React.FC<ComplianceModalProps> = ({
                 </p>
                 <div className="space-y-2 text-xs">
                   <div className="p-3 rounded-lg bg-zinc-900 border border-zinc-800">
-                    <span className="font-semibold text-zinc-200">CacheStorage API (<code className="text-cyan-400">ffmpeg-wasm-engine-v1</code>):</span>
+                    <span className="font-semibold text-zinc-200">IndexedDB Storage (<code className="text-emerald-400">engine_components_v1</code>):</span>
                     <p className="text-zinc-400 mt-0.5">
-                      Stores compiled WebAssembly binaries (<code className="text-zinc-300">ffmpeg-core.wasm</code>) locally on your device for instant offline loading. No personal data is stored.
+                      Stores compiled WebAssembly binaries and runtime worker scripts (<code className="text-zinc-300">ffmpeg-core.wasm</code>, <code className="text-zinc-300">7zz.wasm</code>, <code className="text-zinc-300">unrar.wasm</code>) locally on your device in persistent IndexedDB for instant offline loading and zero network latency. No user data is stored.
                     </p>
                   </div>
                   <div className="p-3 rounded-lg bg-zinc-900 border border-zinc-800">

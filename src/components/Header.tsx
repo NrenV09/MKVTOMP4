@@ -1,5 +1,5 @@
 import React from 'react';
-import { Terminal, Trash2, Cpu, Zap, HardDrive, ShieldCheck, Film, Archive, Columns2 } from 'lucide-react';
+import { Terminal, Trash2, Cpu, Zap, HardDrive, ShieldCheck, Film, Archive, Columns2, Database } from 'lucide-react';
 import { HardwareCapabilities } from '../utils/hardwareEngine';
 import { WasmCacheStats } from '../utils/wasmCache';
 import { ComplianceTab } from './ComplianceModal';
@@ -97,6 +97,17 @@ export const Header: React.FC<HeaderProps> = ({
       {/* Right: Actions */}
       <div className="flex items-center gap-2">
         <PWAInstallButton />
+
+        {wasmCacheStats && wasmCacheStats.itemCount > 0 && (
+          <div
+            className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-[11px] font-mono text-zinc-300 select-none"
+            title={`IndexedDB Engine Cache: ${wasmCacheStats.itemCount} component${wasmCacheStats.itemCount > 1 ? 's' : ''} (${wasmCacheStats.formattedSize})`}
+          >
+            <Database className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+            <span className="text-zinc-400">IDB:</span>
+            <span className="text-emerald-400 font-semibold">{wasmCacheStats.formattedSize}</span>
+          </div>
+        )}
 
         {onPurgeCache && (
           <button

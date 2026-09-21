@@ -49,6 +49,7 @@ import {
   WASM_ENGINE_CACHE_NAME,
   WasmCacheStats,
 } from './utils/wasmCache';
+import { preloadArchiveCoresToIDB } from './utils/engineIndexedDBCache';
 
 import { Header, WorkspaceMode } from './components/Header';
 import { MediaDropzone } from './components/MediaDropzone';
@@ -215,7 +216,7 @@ export default function App() {
     }
 
     setIsPurged(true);
-    addLog('system', 'Purged media cache and released memory buffers (WebAssembly engine safely preserved in cache).');
+    addLog('system', 'Purged temporary media buffers (WebAssembly engine safely preserved in IndexedDB cache).');
     getWasmCacheStats().then(setWasmCacheStats);
   }, [addLog, revokeActiveUrl]);
 
@@ -339,10 +340,10 @@ export default function App() {
 
           if (coreRes.fromCache && wasmRes.fromCache) {
             const cachedMB = ((coreRes.sizeBytes + wasmRes.sizeBytes) / 1024 / 1024).toFixed(1);
-            addLog('system', `WebAssembly multi-threaded core loaded directly from persistent browser cache (${cachedMB} MB, zero network transfer).`);
+            addLog('system', `WebAssembly multi-threaded core loaded directly from IndexedDB cache (${cachedMB} MB, zero network transfer).`);
           } else {
             const storedMB = ((coreRes.sizeBytes + wasmRes.sizeBytes) / 1024 / 1024).toFixed(1);
-            addLog('system', `WebAssembly multi-threaded core saved to persistent browser cache (${storedMB} MB).`);
+            addLog('system', `WebAssembly multi-threaded core cached in persistent IndexedDB (${storedMB} MB).`);
           }
 
           await ffmpeg.load({
@@ -372,10 +373,10 @@ export default function App() {
 
         if (coreRes.fromCache && wasmRes.fromCache) {
           const cachedMB = ((coreRes.sizeBytes + wasmRes.sizeBytes) / 1024 / 1024).toFixed(1);
-          addLog('system', `WebAssembly core loaded directly from persistent browser cache (${cachedMB} MB, zero network transfer).`);
+          addLog('system', `WebAssembly core loaded directly from IndexedDB cache (${cachedMB} MB, zero network transfer).`);
         } else {
           const storedMB = ((coreRes.sizeBytes + wasmRes.sizeBytes) / 1024 / 1024).toFixed(1);
-          addLog('system', `WebAssembly core saved to persistent browser cache (${storedMB} MB).`);
+          addLog('system', `WebAssembly core cached in persistent IndexedDB (${storedMB} MB).`);
         }
 
         await ffmpeg.load({
@@ -384,10 +385,15 @@ export default function App() {
           classWorkerURL: workerURL,
         });
         setEngineMode('st');
-        addLog('system', 'FFmpeg WebAssembly Core successfully mounted from persistent browser cache. 100% offline MEMFS ready.');
+        addLog('system', 'FFmpeg WebAssembly Core successfully mounted from persistent IndexedDB. 100% offline MEMFS ready.');
       }
       setEngineReady(true);
       getWasmCacheStats().then(setWasmCacheStats);
+
+      // Preload archive WebAssembly cores (7z and UnRAR) into IndexedDB in background
+      preloadArchiveCoresToIDB()
+        .then(() => getWasmCacheStats().then(setWasmCacheStats))
+        .catch(() => {});
     } catch (err: any) {
       console.error('FFmpeg load error:', err);
       const msg = err?.message || 'Failed to initialize WebAssembly engine.';
