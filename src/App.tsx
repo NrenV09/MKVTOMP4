@@ -340,10 +340,11 @@ export default function App() {
 
           if (coreRes.fromCache && wasmRes.fromCache) {
             const cachedMB = ((coreRes.sizeBytes + wasmRes.sizeBytes) / 1024 / 1024).toFixed(1);
-            addLog('system', `WebAssembly multi-threaded core loaded directly from IndexedDB cache (${cachedMB} MB, zero network transfer).`);
+            const srcLabel = coreRes.source === 'cache-storage' ? 'Cache Storage' : coreRes.source === 'indexeddb' ? 'IndexedDB cache' : 'persistent cache';
+            addLog('system', `WebAssembly multi-threaded core loaded directly from ${srcLabel} (${cachedMB} MB, zero network transfer).`);
           } else {
             const storedMB = ((coreRes.sizeBytes + wasmRes.sizeBytes) / 1024 / 1024).toFixed(1);
-            addLog('system', `WebAssembly multi-threaded core cached in persistent IndexedDB (${storedMB} MB).`);
+            addLog('system', `WebAssembly multi-threaded core cached in persistent storage (${storedMB} MB).`);
           }
 
           await ffmpeg.load({
@@ -373,10 +374,11 @@ export default function App() {
 
         if (coreRes.fromCache && wasmRes.fromCache) {
           const cachedMB = ((coreRes.sizeBytes + wasmRes.sizeBytes) / 1024 / 1024).toFixed(1);
-          addLog('system', `WebAssembly core loaded directly from IndexedDB cache (${cachedMB} MB, zero network transfer).`);
+          const srcLabel = coreRes.source === 'cache-storage' ? 'Cache Storage' : coreRes.source === 'indexeddb' ? 'IndexedDB cache' : 'persistent cache';
+          addLog('system', `WebAssembly core loaded directly from ${srcLabel} (${cachedMB} MB, zero network transfer).`);
         } else {
           const storedMB = ((coreRes.sizeBytes + wasmRes.sizeBytes) / 1024 / 1024).toFixed(1);
-          addLog('system', `WebAssembly core cached in persistent IndexedDB (${storedMB} MB).`);
+          addLog('system', `WebAssembly core cached in persistent storage (${storedMB} MB).`);
         }
 
         await ffmpeg.load({
@@ -385,7 +387,7 @@ export default function App() {
           classWorkerURL: workerURL,
         });
         setEngineMode('st');
-        addLog('system', 'FFmpeg WebAssembly Core successfully mounted from persistent IndexedDB. 100% offline MEMFS ready.');
+        addLog('system', 'FFmpeg WebAssembly Core successfully mounted from persistent cache. 100% offline MEMFS ready.');
       }
       setEngineReady(true);
       getWasmCacheStats().then(setWasmCacheStats);
@@ -935,7 +937,7 @@ export default function App() {
                 <div className="space-y-3">
                   <MediaDropzone
                     onFileSelected={handleFileSelected}
-                    disabled={!engineReady || engineLoading}
+                    disabled={false}
                   />
 
                   {!engineReady && !engineError && (
@@ -1005,10 +1007,17 @@ export default function App() {
 
                         <button
                           onClick={handleStartConversion}
-                          disabled={!engineReady || isConverting}
+                          disabled={!engineReady || isConverting || engineLoading}
                           className="w-full sm:w-auto px-6 py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-zinc-950 font-bold text-xs transition-all shadow-md shadow-emerald-500/25 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
                         >
-                          <span>Convert to .{config.container.toUpperCase()}</span>
+                          {engineLoading ? (
+                            <>
+                              <Loader2 className="w-4 h-4 animate-spin text-zinc-950" />
+                              <span>Mounting Engine...</span>
+                            </>
+                          ) : (
+                            <span>Convert to .{config.container.toUpperCase()}</span>
+                          )}
                         </button>
                       </div>
 
@@ -1044,7 +1053,7 @@ export default function App() {
               <div className="space-y-3">
                 <MediaDropzone
                   onFileSelected={handleFileSelected}
-                  disabled={!engineReady || engineLoading}
+                  disabled={false}
                 />
 
                 {!engineReady && !engineError && (
@@ -1122,11 +1131,18 @@ export default function App() {
 
                       <button
                         onClick={handleStartConversion}
-                        disabled={!engineReady || isConverting}
+                        disabled={!engineReady || isConverting || engineLoading}
                         aria-label={`Convert media file to ${config.container.toUpperCase()} container`}
                         className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-zinc-950 font-sans font-bold text-sm tracking-wide transition-all shadow-lg shadow-emerald-500/25 flex items-center justify-center gap-2.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed hover:scale-[1.02] active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
                       >
-                        <span>Convert to .{config.container.toUpperCase()}</span>
+                        {engineLoading ? (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin text-zinc-950" />
+                            <span>Mounting Engine...</span>
+                          </>
+                        ) : (
+                          <span>Convert to .{config.container.toUpperCase()}</span>
+                        )}
                       </button>
                     </div>
 

@@ -20,6 +20,10 @@
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
     <link rel="icon" type="image/png" sizes="192x192" href="/pwa-192x192.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
+
+    <!-- WebAssembly Engine Prefetch for Instant First Load -->
+    <link rel="prefetch" href="/ffmpeg/core/ffmpeg-core.wasm" as="fetch" crossorigin="anonymous" />
+    <link rel="prefetch" href="/ffmpeg/core-mt/ffmpeg-core.wasm" as="fetch" crossorigin="anonymous" />
   </head>
   <body>
     <div id="root"></div>

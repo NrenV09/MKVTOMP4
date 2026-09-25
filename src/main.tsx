@@ -3,9 +3,14 @@ import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
 import { registerSW } from 'virtual:pwa-register';
+import { preloadAllEnginesToIDB } from './utils/engineIndexedDBCache';
 
-// Register PWA service worker immediately for offline capability
+// Eagerly pre-cache WebAssembly media converter and archive engines into IndexedDB on first website load
 if (typeof window !== 'undefined') {
+  preloadAllEnginesToIDB().catch((err) => {
+    console.warn('[Engine Init] Background preload notice:', err);
+  });
+
   registerSW({
     immediate: true,
     onNeedRefresh() {

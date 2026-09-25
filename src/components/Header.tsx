@@ -101,10 +101,16 @@ export const Header: React.FC<HeaderProps> = ({
         {wasmCacheStats && wasmCacheStats.itemCount > 0 && (
           <div
             className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-[11px] font-mono text-zinc-300 select-none"
-            title={`IndexedDB Engine Cache: ${wasmCacheStats.itemCount} component${wasmCacheStats.itemCount > 1 ? 's' : ''} (${wasmCacheStats.formattedSize})`}
+            title={`WebAssembly Engine: ${wasmCacheStats.itemCount} component${wasmCacheStats.itemCount > 1 ? 's' : ''} (${wasmCacheStats.formattedSize}) stored in ${
+              wasmCacheStats.storageType === 'dual'
+                ? 'Browser Cache Storage & IndexedDB'
+                : wasmCacheStats.storageType === 'cache-storage'
+                ? 'Browser Cache Storage'
+                : 'IndexedDB'
+            } for offline instant conversion`}
           >
             <Database className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-            <span className="text-zinc-400">IDB:</span>
+            <span className="text-zinc-400">Cache:</span>
             <span className="text-emerald-400 font-semibold">{wasmCacheStats.formattedSize}</span>
           </div>
         )}

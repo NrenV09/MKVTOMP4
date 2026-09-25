@@ -116,7 +116,7 @@ export function openEngineDB(): Promise<IDBDatabase> {
 
 /**
  * Retrieves an engine component binary from IndexedDB.
- * Checks both the exact key and the normalized key.
+ * Checks the normalized key first (fast O(1) primary key), then raw key as fallback.
  */
 export async function getComponentFromIDB(key: string): Promise<StoredEngineComponent | null> {
   if (!isIndexedDBAvailable()) return null;
@@ -129,8 +129,8 @@ export async function getComponentFromIDB(key: string): Promise<StoredEngineComp
       const tx = db.transaction(ENGINE_IDB_STORE_NAME, 'readonly');
       const store = tx.objectStore(ENGINE_IDB_STORE_NAME);
 
-      // 1. Try exact key
-      const exactReq = store.get(key);
+      // 1. Check normalized key directly (primary key)
+      const exactReq = store.get(normalized);
 
       exactReq.onsuccess = () => {
         if (exactReq.result && exactReq.result.data) {
@@ -138,24 +138,28 @@ export async function getComponentFromIDB(key: string): Promise<StoredEngineComp
           return;
         }
 
-        // 2. Try normalized key via index
-        try {
-          const index = store.index('normalizedKey');
-          const indexReq = index.get(normalized);
-          indexReq.onsuccess = () => {
-            if (indexReq.result && indexReq.result.data) {
-              resolve(indexReq.result as StoredEngineComponent);
-            } else {
-              // 3. Fallback: try with leading slash removed or added
-              const altReq = store.get(normalized);
-              altReq.onsuccess = () => {
-                resolve(altReq.result ? (altReq.result as StoredEngineComponent) : null);
+        // 2. Fallback: check original key if it differed
+        if (key !== normalized) {
+          const rawReq = store.get(key);
+          rawReq.onsuccess = () => {
+            if (rawReq.result && rawReq.result.data) {
+              resolve(rawReq.result as StoredEngineComponent);
+              return;
+            }
+            // 3. Fallback: query index
+            try {
+              const index = store.index('normalizedKey');
+              const indexReq = index.get(normalized);
+              indexReq.onsuccess = () => {
+                resolve(indexReq.result ? (indexReq.result as StoredEngineComponent) : null);
               };
-              altReq.onerror = () => resolve(null);
+              indexReq.onerror = () => resolve(null);
+            } catch {
+              resolve(null);
             }
           };
-          indexReq.onerror = () => resolve(null);
-        } catch {
+          rawReq.onerror = () => resolve(null);
+        } else {
           resolve(null);
         }
       };
@@ -170,6 +174,7 @@ export async function getComponentFromIDB(key: string): Promise<StoredEngineComp
 
 /**
  * Persists an engine component (ArrayBuffer) into IndexedDB.
+ * Uses normalizedKey as the primary key to avoid storing multiple 30MB+ duplicate copies.
  */
 export async function saveComponentToIDB(
   key: string,
@@ -184,7 +189,7 @@ export async function saveComponentToIDB(
     const normalizedKey = normalizeComponentKey(key);
 
     const record: StoredEngineComponent = {
-      key,
+      key: normalizedKey, // Canonical primary key
       normalizedKey,
       data,
       mimeType,
@@ -198,15 +203,6 @@ export async function saveComponentToIDB(
       const store = tx.objectStore(ENGINE_IDB_STORE_NAME);
 
       const putReq = store.put(record);
-
-      // If the normalized key is different from the input key, also store a copy
-      // with normalizedKey so future relative/absolute fetches hit immediately
-      if (normalizedKey !== key) {
-        store.put({
-          ...record,
-          key: normalizedKey,
-        });
-      }
 
       putReq.onsuccess = () => resolve();
       putReq.onerror = () => reject(putReq.error || new Error('Failed to save component to IndexedDB'));
@@ -361,39 +357,65 @@ export function isValidWasmBuffer(buf: ArrayBuffer | null | undefined): boolean 
   );
 }
 
+import {
+  saveComponentToCacheStorage,
+  getComponentFromCacheStorage,
+  isCacheStorageAvailable,
+} from './wasmCache';
+
 /**
  * Background preloader to ensure both archive WebAssembly cores (7z & unrar)
- * are cached in IndexedDB for immediate offline use.
+ * are cached in IndexedDB and CacheStorage for immediate offline use.
  */
 export async function preloadArchiveCoresToIDB(): Promise<void> {
-  if (!isIndexedDBAvailable()) return;
+  const isIDBAvail = isIndexedDBAvailable();
+  const isCacheAvail = isCacheStorageAvailable();
+  if (!isIDBAvail && !isCacheAvail) return;
 
   try {
-    // 1. Check 7-Zip core
-    const existing7z = await getComponentFromIDB('7z/7zz.wasm');
-    if (!existing7z || !isValidWasmBuffer(existing7z.data)) {
+    const archiveTargets = [
+      { url: '7z/7zz.wasm', label: '7-Zip WebAssembly Core' },
+      { url: 'rar/unrar.wasm', label: 'UnRAR WebAssembly Core' },
+    ];
+
+    for (const item of archiveTargets) {
       try {
-        const res = await fetch('/7z/7zz.wasm');
-        if (res.ok) {
-          const buf = await res.arrayBuffer();
-          if (isValidWasmBuffer(buf)) {
-            await saveComponentToIDB('7z/7zz.wasm', buf, 'application/wasm', '7-Zip WebAssembly Core');
+        let buf: ArrayBuffer | null = null;
+
+        // Check IndexedDB
+        if (isIDBAvail) {
+          const existingIDB = await getComponentFromIDB(item.url);
+          if (existingIDB && isValidWasmBuffer(existingIDB.data)) {
+            buf = existingIDB.data;
           }
         }
-      } catch {
-        // ignore background fetch error
-      }
-    }
 
-    // 2. Check UnRAR core
-    const existingRar = await getComponentFromIDB('rar/unrar.wasm');
-    if (!existingRar || !isValidWasmBuffer(existingRar.data)) {
-      try {
-        const res = await fetch('/rar/unrar.wasm');
-        if (res.ok) {
-          const buf = await res.arrayBuffer();
-          if (isValidWasmBuffer(buf)) {
-            await saveComponentToIDB('rar/unrar.wasm', buf, 'application/wasm', 'UnRAR WebAssembly Core');
+        // Check CacheStorage
+        if (!buf && isCacheAvail) {
+          const existingCache = await getComponentFromCacheStorage(item.url);
+          if (existingCache && isValidWasmBuffer(existingCache.data)) {
+            buf = existingCache.data;
+          }
+        }
+
+        // If not in either, fetch from origin
+        if (!buf) {
+          const res = await fetch(`/${item.url}`);
+          if (res.ok) {
+            const fetchedBuf = await res.arrayBuffer();
+            if (isValidWasmBuffer(fetchedBuf)) {
+              buf = fetchedBuf;
+            }
+          }
+        }
+
+        // Commit to both IndexedDB and CacheStorage
+        if (buf) {
+          if (isIDBAvail) {
+            await saveComponentToIDB(item.url, buf, 'application/wasm', item.label);
+          }
+          if (isCacheAvail) {
+            await saveComponentToCacheStorage(item.url, buf, 'application/wasm');
           }
         }
       } catch {
@@ -403,4 +425,111 @@ export async function preloadArchiveCoresToIDB(): Promise<void> {
   } catch {
     // ignore
   }
+}
+
+/**
+ * Checks if the current browser environment can support multi-threaded WebAssembly.
+ */
+export function detectEngineNeedsMultiThreading(): boolean {
+  try {
+    return (
+      typeof SharedArrayBuffer !== 'undefined' &&
+      typeof window !== 'undefined' &&
+      !!(window as any).crossOriginIsolated
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Eagerly preloads and caches the FFmpeg media converter WebAssembly engine
+ * into persistent CacheStorage AND IndexedDB on the first visit.
+ * Fetches the required core runtime, worker, and binary in parallel, verifies integrity,
+ * and commits them directly to both persistent CacheStorage and IndexedDB.
+ */
+export async function preloadMediaEngineToIDB(): Promise<void> {
+  const isIDBAvail = isIndexedDBAvailable();
+  const isCacheAvail = isCacheStorageAvailable();
+  if (!isIDBAvail && !isCacheAvail) return;
+
+  try {
+    const hasSAB = detectEngineNeedsMultiThreading();
+    const prefix = hasSAB ? '/ffmpeg/core-mt/' : '/ffmpeg/core/';
+    const targets = hasSAB
+      ? [
+          { url: `${prefix}ffmpeg-core.js`, type: 'text/javascript', label: 'FFmpeg Core MT Runtime (JS)' },
+          { url: `${prefix}ffmpeg-core.wasm`, type: 'application/wasm', label: 'FFmpeg Core MT (WASM)' },
+          { url: `${prefix}ffmpeg-core.worker.js`, type: 'text/javascript', label: 'FFmpeg Core MT Worker (JS)' },
+        ]
+      : [
+          { url: `${prefix}ffmpeg-core.js`, type: 'text/javascript', label: 'FFmpeg Core Runtime (JS)' },
+          { url: `${prefix}ffmpeg-core.wasm`, type: 'application/wasm', label: 'FFmpeg Core (WASM)' },
+        ];
+
+    // Fetch and store uncached components concurrently into both CacheStorage and IndexedDB
+    await Promise.all(
+      targets.map(async (t) => {
+        try {
+          let buf: ArrayBuffer | null = null;
+
+          // Check if already in IndexedDB
+          if (isIDBAvail) {
+            const existingIDB = await getComponentFromIDB(t.url);
+            if (existingIDB && existingIDB.data && existingIDB.data.byteLength > 0) {
+              buf = existingIDB.data;
+            }
+          }
+
+          // Check if already in CacheStorage
+          if (!buf && isCacheAvail) {
+            const existingCache = await getComponentFromCacheStorage(t.url);
+            if (existingCache && existingCache.data && existingCache.data.byteLength > 0) {
+              buf = existingCache.data;
+            }
+          }
+
+          // If neither has it, fetch over network
+          if (!buf) {
+            const res = await fetch(t.url);
+            if (res.ok) {
+              buf = await res.arrayBuffer();
+            }
+          }
+
+          if (buf && buf.byteLength > 0) {
+            if (t.type === 'application/wasm' && !isValidWasmBuffer(buf)) {
+              console.warn(`[Engine Cache] Invalid WebAssembly binary received for ${t.url}`);
+              return;
+            }
+
+            // Save to IndexedDB
+            if (isIDBAvail) {
+              await saveComponentToIDB(t.url, buf, t.type, t.label);
+            }
+
+            // Save to CacheStorage
+            if (isCacheAvail) {
+              await saveComponentToCacheStorage(t.url, buf, t.type);
+            }
+          }
+        } catch (err) {
+          console.warn(`[Engine Cache] Preload fetch failed for ${t.url}:`, err);
+        }
+      })
+    );
+  } catch (err) {
+    console.warn('[Engine Cache] Media converter preload failed:', err);
+  }
+}
+
+/**
+ * Master eager loader: Preloads both media conversion and archive engine components
+ * into persistent CacheStorage & IndexedDB on startup.
+ */
+export async function preloadAllEnginesToIDB(): Promise<void> {
+  // 1. High priority: Media converter engine into CacheStorage & IndexedDB
+  await preloadMediaEngineToIDB();
+  // 2. Background priority: Archive engines (7-Zip & UnRAR)
+  preloadArchiveCoresToIDB().catch(() => {});
 }
