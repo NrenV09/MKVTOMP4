@@ -99,11 +99,10 @@ async function getUnrarWasmBinary(
     }
   }
 
+  // Standard local self-contained paths (zero external network requests)
   candidates.push('/rar/unrar.wasm');
   candidates.push('./rar/unrar.wasm');
   candidates.push('rar/unrar.wasm');
-  candidates.push('https://cdn.jsdelivr.net/npm/node-unrar-js@2.0.2/dist/js/unrar.wasm');
-  candidates.push('https://unpkg.com/node-unrar-js@2.0.2/dist/js/unrar.wasm');
 
   const uniqueCandidates = Array.from(new Set(candidates));
 

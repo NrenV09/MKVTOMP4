@@ -109,15 +109,10 @@ export async function get7zWasmBinary(
     }
   }
 
-  // Standard root and relative paths
+  // Standard local self-contained paths (zero external network requests)
   candidates.push('/7z/7zz.wasm');
   candidates.push('./7z/7zz.wasm');
   candidates.push('7z/7zz.wasm');
-
-  // Fast, reliable public CDN fallbacks
-  candidates.push('https://cdn.jsdelivr.net/npm/7z-wasm@1.2.0/7zz.wasm');
-  candidates.push('https://unpkg.com/7z-wasm@1.2.0/7zz.wasm');
-  candidates.push('https://fastly.jsdelivr.net/npm/7z-wasm@1.2.0/7zz.wasm');
 
   // De-duplicate candidate list
   const uniqueCandidates = Array.from(new Set(candidates));
