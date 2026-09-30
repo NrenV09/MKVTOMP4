@@ -51,15 +51,11 @@ export const Header: React.FC<HeaderProps> = ({
           <div className="text-[11px] text-zinc-500 flex items-center gap-1.5 mt-0.5">
             <span
               className={`w-1.5 h-1.5 rounded-full ${
-                engineReady ? 'bg-emerald-500' : engineLoading ? 'bg-amber-500 animate-pulse' : 'bg-zinc-600'
+                engineLoading ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'
               }`}
             />
             <span>
-              {engineReady
-                ? 'Offline Ready'
-                : engineLoading
-                ? 'Loading engine...'
-                : 'Offline'}
+              {engineLoading ? 'Preparing engine...' : 'Offline Ready'}
             </span>
           </div>
         </div>

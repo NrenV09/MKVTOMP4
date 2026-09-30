@@ -220,11 +220,11 @@ export default function App() {
     getWasmCacheStats().then(setWasmCacheStats);
   }, [addLog, revokeActiveUrl]);
 
-  // Initialize FFmpeg WebAssembly core
-  const initEngine = async () => {
+  // Initialize FFmpeg WebAssembly core on-demand
+  const initEngine = async (): Promise<boolean> => {
     if (ffmpegRef.current && ffmpegRef.current.loaded) {
       setEngineReady(true);
-      return;
+      return true;
     }
 
     setEngineLoading(true);
@@ -390,24 +390,22 @@ export default function App() {
         addLog('system', 'FFmpeg WebAssembly Core successfully mounted from persistent cache. 100% offline MEMFS ready.');
       }
       setEngineReady(true);
-      getWasmCacheStats().then(setWasmCacheStats);
-
-      // Preload archive WebAssembly cores (7z and UnRAR) into IndexedDB in background
-      preloadArchiveCoresToIDB()
-        .then(() => getWasmCacheStats().then(setWasmCacheStats))
-        .catch(() => {});
+      getWasmCacheStats().then(setWasmCacheStats).catch(() => {});
+      return true;
     } catch (err: any) {
       console.error('FFmpeg load error:', err);
       const msg = err?.message || 'Failed to initialize WebAssembly engine.';
       setEngineError(msg);
       addLog('error', `Engine init failure: ${msg}`);
+      return false;
     } finally {
       setEngineLoading(false);
     }
   };
 
   useEffect(() => {
-    initEngine();
+    // Only inspect existing offline cache stats on mount (zero network calls)
+    getWasmCacheStats().then(setWasmCacheStats).catch(() => {});
     return () => {
       revokeActiveUrl();
     };
@@ -574,7 +572,7 @@ export default function App() {
 
   // Convert execution
   const handleStartConversion = async () => {
-    if (!rawFile || !sourceMeta || !ffmpegRef.current) return;
+    if (!rawFile || !sourceMeta) return;
 
     // Safety validation
     const compat = checkCompatibility(sourceMeta, config);
@@ -588,6 +586,17 @@ export default function App() {
     setIsConverting(true);
     setConversionError(null);
     setResult(null);
+
+    // On-demand engine initialization if not yet mounted
+    if (!ffmpegRef.current || !engineReady) {
+      addLog('system', 'Initializing local conversion engine...');
+      const ready = await initEngine();
+      if (!ready || !ffmpegRef.current) {
+        setIsConverting(false);
+        setConversionError('Could not initialize media conversion engine. Please check system console.');
+        return;
+      }
+    }
 
     // Acquire Screen Wake Lock so display/thread does not sleep during active encode
     if (typeof navigator !== 'undefined' && 'wakeLock' in navigator) {
@@ -939,13 +948,6 @@ export default function App() {
                     onFileSelected={handleFileSelected}
                     disabled={false}
                   />
-
-                  {!engineReady && !engineError && (
-                    <div className="flex items-center justify-center gap-2 text-xs font-mono text-zinc-500 py-2">
-                      <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
-                      <span>Mounting WebAssembly engine in background...</span>
-                    </div>
-                  )}
                 </div>
               ) : (
                 <div className="space-y-4">
@@ -1007,13 +1009,13 @@ export default function App() {
 
                         <button
                           onClick={handleStartConversion}
-                          disabled={!engineReady || isConverting || engineLoading}
+                          disabled={!rawFile || isConverting || engineLoading}
                           className="w-full sm:w-auto px-6 py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-zinc-950 font-bold text-xs transition-all shadow-md shadow-emerald-500/25 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
                         >
                           {engineLoading ? (
                             <>
                               <Loader2 className="w-4 h-4 animate-spin text-zinc-950" />
-                              <span>Mounting Engine...</span>
+                              <span>Loading Engine...</span>
                             </>
                           ) : (
                             <span>Convert to .{config.container.toUpperCase()}</span>
@@ -1055,13 +1057,6 @@ export default function App() {
                   onFileSelected={handleFileSelected}
                   disabled={false}
                 />
-
-                {!engineReady && !engineError && (
-                  <div className="flex items-center justify-center gap-2 text-xs font-mono text-zinc-500 py-2">
-                    <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
-                    <span>Mounting WebAssembly engine in background...</span>
-                  </div>
-                )}
               </div>
             ) : (
               <div className="space-y-4">
@@ -1131,14 +1126,14 @@ export default function App() {
 
                       <button
                         onClick={handleStartConversion}
-                        disabled={!engineReady || isConverting || engineLoading}
+                        disabled={!rawFile || isConverting || engineLoading}
                         aria-label={`Convert media file to ${config.container.toUpperCase()} container`}
                         className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-zinc-950 font-sans font-bold text-sm tracking-wide transition-all shadow-lg shadow-emerald-500/25 flex items-center justify-center gap-2.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed hover:scale-[1.02] active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
                       >
                         {engineLoading ? (
                           <>
                             <Loader2 className="w-4 h-4 animate-spin text-zinc-950" />
-                            <span>Mounting Engine...</span>
+                            <span>Loading Engine...</span>
                           </>
                         ) : (
                           <span>Convert to .{config.container.toUpperCase()}</span>
