@@ -1,6 +1,7 @@
 import SevenZip, { SevenZipModule } from '7z-wasm';
 import { ExtractedArchiveItem, guessMimeType, getPreviewType } from './archiveEngine';
 import { getComponentFromIDB, saveComponentToIDB } from './engineIndexedDBCache';
+import { getComponentFromCacheStorage, saveComponentToCacheStorage } from './wasmCache';
 
 let cached7zWasmBinary: ArrayBuffer | null = null;
 let cachedBlobUrl: string | null = null;
@@ -33,7 +34,7 @@ async function fetchWasmCandidate(url: string): Promise<ArrayBuffer | null> {
 }
 
 /**
- * Fetch and verify the 7zz.wasm binary with multi-source fallback (local base, root, CDN)
+ * Fetch and verify the 7zz.wasm binary with multi-source local fallback
  */
 export async function get7zWasmBinary(
   onProgress?: (percent: number, msg: string) => void
@@ -57,22 +58,15 @@ export async function get7zWasmBinary(
   }
 
   // 2. Try CacheStorage (and migrate to IndexedDB if present)
-  const CACHE_NAME = 'archive-wasm-runtime-cache';
-  if (typeof window !== 'undefined' && 'caches' in window) {
-    try {
-      const cache = await window.caches.open(CACHE_NAME);
-      const matched = await cache.match('7z/7zz.wasm');
-      if (matched) {
-        const buf = await matched.arrayBuffer();
-        if (isValidWasm(buf)) {
-          cached7zWasmBinary = buf;
-          saveComponentToIDB('7z/7zz.wasm', buf.slice(0), 'application/wasm', '7-Zip WebAssembly Core').catch(() => {});
-          return buf.slice(0);
-        }
-      }
-    } catch {
-      // ignore cache check error
+  try {
+    const cacheItem = await getComponentFromCacheStorage('7z/7zz.wasm');
+    if (cacheItem && isValidWasm(cacheItem.data)) {
+      cached7zWasmBinary = cacheItem.data;
+      saveComponentToIDB('7z/7zz.wasm', cacheItem.data.slice(0), 'application/wasm', '7-Zip WebAssembly Core').catch(() => {});
+      return cacheItem.data.slice(0);
     }
+  } catch {
+    // ignore cache check error
   }
 
   // 3. Build candidate URLs
@@ -135,18 +129,10 @@ export async function get7zWasmBinary(
       }
 
       // 2. Also persist to CacheStorage for redundancy
-      if (typeof window !== 'undefined' && 'caches' in window) {
-        try {
-          const cache = await window.caches.open(CACHE_NAME);
-          await cache.put(
-            '7z/7zz.wasm',
-            new Response(buf.slice(0), {
-              headers: { 'Content-Type': 'application/wasm' },
-            })
-          );
-        } catch {
-          // ignore cache put error
-        }
+      try {
+        await saveComponentToCacheStorage('7z/7zz.wasm', buf.slice(0), 'application/wasm');
+      } catch {
+        // ignore cache put error
       }
 
       return buf.slice(0);
@@ -163,7 +149,8 @@ export async function get7zWasmBinary(
  */
 export async function getSevenZipModule(
   onProgress?: (percent: number, msg: string) => void,
-  onLog?: (line: string) => void
+  onLog?: (line: string) => void,
+  onErrLog?: (line: string) => void
 ): Promise<SevenZipModule> {
   const wasmBinary = await get7zWasmBinary(onProgress);
 
@@ -185,6 +172,7 @@ export async function getSevenZipModule(
       if (onLog) onLog(line);
     },
     printErr: (line: string) => {
+      if (onErrLog) onErrLog(line);
       console.warn('[7z-wasm:err]', line);
     },
   });
@@ -466,9 +454,12 @@ export async function extractWithSevenZip(
   onProgress?: (percent: number, status: string) => void
 ): Promise<ExtractedArchiveItem[]> {
   onProgress?.(25, 'Spinning up 7-Zip WebAssembly extraction engine...');
+  const capturedLogs: string[] = [];
+
   const sevenZip = await getSevenZipModule(
     (pct, msg) => onProgress?.(pct, msg),
     (line) => {
+      capturedLogs.push(line);
       if (line.includes('%')) {
         const match = line.match(/(\d+)%/);
         if (match) {
@@ -476,6 +467,9 @@ export async function extractWithSevenZip(
           onProgress?.(30 + Math.floor(pct * 0.5), `Unpacking archive (${pct}%)...`);
         }
       }
+    },
+    (errLine) => {
+      capturedLogs.push(errLine);
     }
   );
 
@@ -490,21 +484,26 @@ export async function extractWithSevenZip(
     FS.mkdir(outDir);
 
     onProgress?.(45, 'Executing 7-Zip extraction command...');
-    // 'x' = extract with full paths
-    // '-o<dir>' = output directory (no space after -o)
-    // '-y' = assume Yes on all queries
-    // '-p<pass>' = password if provided
-    const args = ['x', archivePath, `-o${outDir}`, '-y'];
-    if (password) {
-      args.push(`-p${password}`);
-    }
+    // Always pass -p (even empty) so Emscripten never blocks on window.prompt()
+    const args = ['x', archivePath, `-o${outDir}`, '-y', password ? `-p${password}` : '-p'];
 
     sevenZip.callMain(args);
+
+    const logText = capturedLogs.join('\n');
+    const isPasswordError =
+      /wrong password|encrypted|data error in encrypted/i.test(logText);
 
     onProgress?.(75, 'Reading extracted files from virtual filesystem...');
     const extractedList = collectExtractedFiles(FS, outDir);
 
-    if (extractedList.length === 0) {
+    if (isPasswordError || extractedList.length === 0) {
+      if (isPasswordError) {
+        throw new Error(
+          password
+            ? 'Incorrect archive password provided. Please check the password and try again.'
+            : 'This archive is password-protected. Please enter the archive password to extract.'
+        );
+      }
       throw new Error(
         password
           ? 'Extraction produced no files. Password may be incorrect or archive is corrupt.'

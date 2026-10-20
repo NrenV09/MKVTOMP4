@@ -18,6 +18,7 @@ import {
 
 export const WASM_ENGINE_CACHE_NAME = 'ffmpeg-wasm-engine-v1';
 export const WASM_RUNTIME_CACHE_NAME = 'ffmpeg-wasm-runtime-cache';
+export const ARCHIVE_RUNTIME_CACHE_NAME = 'archive-wasm-runtime-cache';
 
 export interface CachedBinaryResult {
   blobUrl: string;
@@ -91,12 +92,20 @@ export async function saveComponentToCacheStorage(
 
     // Also mirror to runtime cache partition for workbox service worker compatibility
     try {
-      const runtimeCache = await window.caches.open(WASM_RUNTIME_CACHE_NAME);
+      const targetRuntimeCacheName =
+        url.includes('7z') || url.includes('rar')
+          ? ARCHIVE_RUNTIME_CACHE_NAME
+          : WASM_RUNTIME_CACHE_NAME;
+      const runtimeCache = await window.caches.open(targetRuntimeCacheName);
       await runtimeCache.put(fullUrl, createResponse());
       if (pathname && pathname !== fullUrl) {
         await runtimeCache.put(pathname, createResponse());
       }
     } catch {}
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('wasm-cache-updated'));
+    }
 
     return true;
   } catch (err) {
@@ -120,7 +129,11 @@ export async function getComponentFromCacheStorage(
       pathname = new URL(fullUrl).pathname;
     } catch {}
 
-    const cacheNames = [WASM_ENGINE_CACHE_NAME, WASM_RUNTIME_CACHE_NAME];
+    const cacheNames = [
+      WASM_ENGINE_CACHE_NAME,
+      WASM_RUNTIME_CACHE_NAME,
+      ARCHIVE_RUNTIME_CACHE_NAME,
+    ];
     for (const cName of cacheNames) {
       try {
         const cache = await window.caches.open(cName);
@@ -310,7 +323,11 @@ export async function getWasmCacheStats(): Promise<WasmCacheStats> {
 
   if (isCacheStorageAvailable()) {
     try {
-      const cacheNames = [WASM_ENGINE_CACHE_NAME, WASM_RUNTIME_CACHE_NAME];
+      const cacheNames = [
+        WASM_ENGINE_CACHE_NAME,
+        WASM_RUNTIME_CACHE_NAME,
+        ARCHIVE_RUNTIME_CACHE_NAME,
+      ];
       const seenUrls = new Set<string>();
 
       for (const cName of cacheNames) {
@@ -381,6 +398,7 @@ export async function clearWasmEngineCache(): Promise<boolean> {
     try {
       await window.caches.delete(WASM_ENGINE_CACHE_NAME);
       await window.caches.delete(WASM_RUNTIME_CACHE_NAME);
+      await window.caches.delete(ARCHIVE_RUNTIME_CACHE_NAME);
       cleared = true;
     } catch {}
   }

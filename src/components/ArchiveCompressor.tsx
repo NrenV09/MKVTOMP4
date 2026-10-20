@@ -55,7 +55,7 @@ export const WinRarBooksIcon: React.FC<{ className?: string }> = ({ className = 
 
 export const ArchiveCompressor: React.FC = () => {
   const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
-  const [format, setFormat] = useState<'rar' | '7z'>('rar');
+  const [format, setFormat] = useState<CompressionFormat>('rar');
   const [rarVersion, setRarVersion] = useState<'rar50' | 'rar40'>('rar50');
   const [archiveName, setArchiveName] = useState<string>('');
   const [compressionMethod, setCompressionMethod] = useState<WinRarCompressionMethod>('normal');
@@ -231,7 +231,7 @@ export const ArchiveCompressor: React.FC = () => {
     }
   };
 
-  const extension = format === 'rar' ? '.rar' : '.7z';
+  const extension = `.${format}`;
 
   return (
     <div className="space-y-4">
@@ -279,7 +279,7 @@ export const ArchiveCompressor: React.FC = () => {
             Drop files here or browse
           </h3>
           <p className="mt-1 text-xs text-zinc-400">
-            RAR or 7Z
+            Compress into RAR 5.0, 7Z, ZIP, TAR.GZ, TAR, or GZ (100% Offline)
           </p>
 
           <div className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold text-xs transition-colors shadow-md">
@@ -391,8 +391,8 @@ export const ArchiveCompressor: React.FC = () => {
                 )}
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
-                {(['rar', '7z'] as const).map((fmt) => (
+              <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+                {(['rar', '7z', 'zip', 'tar.gz', 'tar', 'gz'] as const).map((fmt) => (
                   <button
                     key={fmt}
                     type="button"
@@ -404,7 +404,7 @@ export const ArchiveCompressor: React.FC = () => {
                         : 'bg-zinc-900/70 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900'
                     }`}
                   >
-                    {fmt}
+                    .{fmt}
                   </button>
                 ))}
               </div>

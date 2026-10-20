@@ -198,7 +198,7 @@ export const ArchiveDecompressor: React.FC = () => {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".rar,.7z,.part1.rar,.r00,application/x-7z-compressed,application/vnd.rar,application/x-rar-compressed"
+            accept=".rar,.7z,.zip,.tar.gz,.tgz,.tar,.gz,.part1.rar,.r00,application/x-7z-compressed,application/vnd.rar,application/x-rar-compressed,application/zip,application/gzip,application/x-tar"
             className="hidden"
             onChange={(e) => handleArchiveSelected(e.target.files)}
           />
@@ -211,7 +211,7 @@ export const ArchiveDecompressor: React.FC = () => {
             Drop archive here or browse
           </h3>
           <p className="mt-1 text-xs text-zinc-400">
-            RAR or 7Z
+            Extract RAR 5.0, 7Z, ZIP, TAR.GZ, TAR, or GZ (100% Offline)
           </p>
 
           <div className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold text-xs transition-colors shadow-md">

@@ -639,39 +639,49 @@ export async function decompressArchive(
     formatDetected = 'ZIP Archive';
     onProgress?.(30, 'Unzipping archive records...');
 
-    const unzipped = await new Promise<Record<string, Uint8Array>>((resolve, reject) => {
-      unzip(rawBytes, (err, data) => {
-        if (err) reject(err);
-        else resolve(data);
-      });
-    });
-
-    onProgress?.(70, 'Building extracted file structure...');
-
-    let index = 0;
-    for (const [pathKey, fileData] of Object.entries(unzipped)) {
-      index++;
-      const isDir = pathKey.endsWith('/');
-      const cleanPath = pathKey.replace(/^\/+/, '');
-      const name = cleanPath.split('/').filter(Boolean).pop() || cleanPath;
-
-      if (!isDir && fileData.length > 0) {
-        const mime = guessMimeType(name);
-        const blob = new Blob([fileData], { type: mime });
-        const preview = getPreviewType(name);
-
-        items.push({
-          id: `zip-item-${index}-${Date.now()}`,
-          path: cleanPath,
-          name,
-          size: fileData.length,
-          isDir: false,
-          lastModified: new Date(archiveFile.lastModified || Date.now()),
-          mimeType: mime,
-          data: fileData,
-          url: URL.createObjectURL(blob),
-          previewType: preview,
+    if (password) {
+      const extractedItems = await extractWithSevenZip(rawBytes, 'zip', password, onProgress);
+      items.push(...extractedItems);
+    } else {
+      try {
+        const unzipped = await new Promise<Record<string, Uint8Array>>((resolve, reject) => {
+          unzip(rawBytes, (err, data) => {
+            if (err) reject(err);
+            else resolve(data);
+          });
         });
+
+        onProgress?.(70, 'Building extracted file structure...');
+
+        let index = 0;
+        for (const [pathKey, fileData] of Object.entries(unzipped)) {
+          index++;
+          const isDir = pathKey.endsWith('/');
+          const cleanPath = pathKey.replace(/^\/+/, '');
+          const name = cleanPath.split('/').filter(Boolean).pop() || cleanPath;
+
+          if (!isDir && fileData.length > 0) {
+            const mime = guessMimeType(name);
+            const blob = new Blob([fileData], { type: mime });
+            const preview = getPreviewType(name);
+
+            items.push({
+              id: `zip-item-${index}-${Date.now()}`,
+              path: cleanPath,
+              name,
+              size: fileData.length,
+              isDir: false,
+              lastModified: new Date(archiveFile.lastModified || Date.now()),
+              mimeType: mime,
+              data: fileData,
+              url: URL.createObjectURL(blob),
+              previewType: preview,
+            });
+          }
+        }
+      } catch (zipErr: any) {
+        const extractedItems = await extractWithSevenZip(rawBytes, 'zip', password, onProgress);
+        items.push(...extractedItems);
       }
     }
   } else if (isGzip || lowerName.endsWith('.gz') || lowerName.endsWith('.tgz')) {

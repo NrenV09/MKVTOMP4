@@ -1,5 +1,108 @@
-import { RarWriter, RarArchive } from '@bitplane/rars';
+import initRarsWasm, { RarBuilder, RarFile } from '../vendor/rars_wasm.js';
 import { formatBytes, ArchiveVolumeItem } from './archiveEngine';
+import { getComponentFromIDB, saveComponentToIDB, isValidWasmBuffer } from './engineIndexedDBCache';
+import { getComponentFromCacheStorage, saveComponentToCacheStorage } from './wasmCache';
+
+export { RarFile };
+
+let rarsWasmInitialized = false;
+let cachedRarsWasmBinary: ArrayBuffer | null = null;
+
+/**
+ * Loads and initializes the WinRAR 5.0 / 4.0 WebAssembly core (rars_wasm_bg.wasm)
+ * from persistent IndexedDB or CacheStorage with zero external network calls.
+ */
+export async function ensureRarsWasmLoaded(
+  onProgress?: (percent: number, status: string) => void
+): Promise<void> {
+  if (rarsWasmInitialized) return;
+
+  let wasmBuf: ArrayBuffer | null = cachedRarsWasmBinary;
+
+  // 1. Check IndexedDB persistent cache
+  if (!wasmBuf || !isValidWasmBuffer(wasmBuf)) {
+    try {
+      const idbItem = await getComponentFromIDB('rar/rars_wasm_bg.wasm');
+      if (idbItem && isValidWasmBuffer(idbItem.data)) {
+        wasmBuf = idbItem.data;
+        onProgress?.(20, 'Loaded WinRAR 5.0 WebAssembly core from IndexedDB cache.');
+      }
+    } catch {}
+  }
+
+  // 2. Check CacheStorage
+  if (!wasmBuf || !isValidWasmBuffer(wasmBuf)) {
+    try {
+      const cacheItem = await getComponentFromCacheStorage('rar/rars_wasm_bg.wasm');
+      if (cacheItem && isValidWasmBuffer(cacheItem.data)) {
+        wasmBuf = cacheItem.data;
+        saveComponentToIDB(
+          'rar/rars_wasm_bg.wasm',
+          wasmBuf.slice(0),
+          'application/wasm',
+          'WinRAR 5.0 WebAssembly Core'
+        ).catch(() => {});
+        onProgress?.(20, 'Loaded WinRAR 5.0 WebAssembly core from CacheStorage.');
+      }
+    } catch {}
+  }
+
+  // 3. Fetch from local self-contained project assets
+  if (!wasmBuf || !isValidWasmBuffer(wasmBuf)) {
+    const candidates = [
+      '/rar/rars_wasm_bg.wasm',
+      './rar/rars_wasm_bg.wasm',
+      'rar/rars_wasm_bg.wasm',
+    ];
+    for (const url of candidates) {
+      try {
+        const res = await fetch(url);
+        if (res.ok) {
+          const buf = await res.arrayBuffer();
+          if (isValidWasmBuffer(buf)) {
+            wasmBuf = buf;
+            break;
+          }
+        }
+      } catch {}
+    }
+
+    if (wasmBuf && isValidWasmBuffer(wasmBuf)) {
+      saveComponentToIDB(
+        'rar/rars_wasm_bg.wasm',
+        wasmBuf.slice(0),
+        'application/wasm',
+        'WinRAR 5.0 WebAssembly Core'
+      ).catch(() => {});
+      saveComponentToCacheStorage('rar/rars_wasm_bg.wasm', wasmBuf.slice(0), 'application/wasm').catch(
+        () => {}
+      );
+    }
+  }
+
+  if (!wasmBuf || !isValidWasmBuffer(wasmBuf)) {
+    throw new Error('Unable to load local WinRAR WebAssembly core (rars_wasm_bg.wasm).');
+  }
+
+  cachedRarsWasmBinary = wasmBuf;
+  await initRarsWasm({ module_or_path: wasmBuf.slice(0) });
+  rarsWasmInitialized = true;
+}
+
+function toDosDate(milliseconds?: number): number | undefined {
+  if (milliseconds === undefined) return undefined;
+  const date = new Date(milliseconds);
+  const year = Math.min(2107, Math.max(1980, date.getUTCFullYear()));
+  const time =
+    (date.getUTCHours() << 11) |
+    (date.getUTCMinutes() << 5) |
+    Math.floor(date.getUTCSeconds() / 2);
+  const day =
+    ((year - 1980) << 9) |
+    ((date.getUTCMonth() + 1) << 5) |
+    date.getUTCDate();
+  return ((day << 16) | time) >>> 0;
+}
 
 export interface RarCompressionOptions {
   format?: 'rar50' | 'rar40';
@@ -173,7 +276,7 @@ export function createPureRar4Archive(
 
 /**
  * Compress files into an authentic RAR archive (RAR 5.0 with AES-256 or RAR 4.0)
- * Uses @bitplane/rars WebAssembly engine with fallback to server API and pure TS writer.
+ * Uses direct cached rars_wasm_bg.wasm WebAssembly engine with fallback to pure TS writer.
  */
 export async function createRarArchive(
   files: { name: string; data: Uint8Array; mtime?: number }[],
@@ -181,7 +284,8 @@ export async function createRarArchive(
   onProgress?: (percent: number, status: string) => void
 ): Promise<RarCompressionResult> {
   const format = options.format || 'rar50';
-  const level = options.level ?? winrarMethodToLevel(options.method);
+  const rawLevel = options.level ?? winrarMethodToLevel(options.method);
+  const level = Math.min(5, Math.max(0, rawLevel));
   const solid = options.solid !== false;
   const password = options.password || undefined;
   const encryptHeaders = !!options.encryptHeaders && !!password;
@@ -190,131 +294,80 @@ export async function createRarArchive(
 
   onProgress?.(25, `Preparing ${format === 'rar50' ? 'RAR 5.0 (AES-256)' : 'RAR 4.0'} archive engine...`);
 
-  // Try Client-Side @bitplane/rars WebAssembly RarWriter
+  // Primary: Direct cached WebAssembly RarBuilder
   try {
+    await ensureRarsWasmLoaded(onProgress);
     const isSplit = !!(splitBytes && splitBytes > 0);
-    const writer = new RarWriter({
+    const builder = new RarBuilder({
       format,
-      level: (Math.min(5, Math.max(0, level)) as 0 | 1 | 2 | 3 | 4 | 5),
+      compression: level,
+      store: level === 0,
       solid,
       password,
       encryptHeaders,
       recoveryPercent: recoveryPercent > 0 ? recoveryPercent : undefined,
       comment: isSplit ? undefined : (options.comment || 'Created with Genuine WinRAR Engine'),
+      volumeSize: isSplit ? splitBytes : undefined,
     });
 
-    for (let i = 0; i < files.length; i++) {
-      const f = files[i];
-      const cleanName = f.name.replace(/\\/g, '/').replace(/^\/+/, '');
-      writer.add(cleanName, f.data, {
-        modifiedAt: f.mtime ? new Date(f.mtime) : new Date(),
-      });
-      onProgress?.(
-        30 + Math.floor(((i + 1) / files.length) * 25),
-        `Packing ${cleanName} (${formatBytes(f.data.length)})`
-      );
-    }
-
-    onProgress?.(60, `Computing ${password ? 'AES-256 encryption & ' : ''}RAR 5.0 data stream...`);
-
-    if (splitBytes && splitBytes > 0) {
-      onProgress?.(70, `Splitting RAR archive into ${formatBytes(splitBytes)} volumes...`);
-      const rawVolumes = await writer.volumes(splitBytes);
-      const volumes: ArchiveVolumeItem[] = rawVolumes.map((volBytes, idx) => {
-        const ext = idx === 0 ? '.part1.rar' : `.part${idx + 1}.rar`;
-        return {
-          name: `archive${ext}`,
-          blob: new Blob([volBytes], { type: 'application/vnd.rar' }),
-          size: volBytes.length,
-        };
-      });
-
-      return {
-        data: rawVolumes[0],
-        volumes,
-        format,
-        isEncrypted: !!password,
-        hasEncryptedHeaders: encryptHeaders,
-        recoveryRecordPercent: recoveryPercent,
-      };
-    }
-
-    const archiveBytes = await writer.bytes({
-      onProgress: (p) => {
-        if (p.total > 0) {
-          const pct = Math.min(95, 60 + Math.floor((p.completed / p.total) * 35));
-          onProgress?.(pct, `Generating RAR container (${pct}%)...`);
-        }
-      },
-    });
-
-    return {
-      data: archiveBytes,
-      format,
-      isEncrypted: !!password,
-      hasEncryptedHeaders: encryptHeaders,
-      recoveryRecordPercent: recoveryPercent,
-    };
-  } catch (err: any) {
-    console.warn('Client-side RarWriter notice:', err?.message, '- Trying server API fallback...');
-  }
-
-  // Fallback 1: Try Server-Side /api/compress-rar
-  try {
-    onProgress?.(70, 'Connecting to server RAR compression worker...');
-    const payload = {
-      files: files.map((f) => ({
-        name: f.name.replace(/\\/g, '/').replace(/^\/+/, ''),
-        dataBase64: uint8ArrayToBase64(f.data),
-        mtime: f.mtime || Date.now(),
-      })),
-      options: {
-        format,
-        level,
-        solid,
-        password,
-        encryptHeaders,
-        recoveryPercent,
-        splitBytes,
-        comment: options.comment,
-      },
-    };
-
-    const res = await fetch('/api/compress-rar', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-
-    if (res.ok) {
-      const resultJson = await res.json();
-      const mainData = base64ToUint8Array(resultJson.dataBase64);
-      let volumes: ArchiveVolumeItem[] | undefined;
-      if (resultJson.volumes && Array.isArray(resultJson.volumes)) {
-        volumes = resultJson.volumes.map((v: any) => {
-          const volData = base64ToUint8Array(v.dataBase64);
-          return {
-            name: v.name,
-            blob: new Blob([volData], { type: 'application/vnd.rar' }),
-            size: volData.length,
-          };
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i];
+        const cleanName = f.name.replace(/\\/g, '/').replace(/^\/+/, '');
+        builder.addBytes(cleanName, f.data, {
+          mtime: toDosDate(f.mtime || Date.now()),
+          mode: 0o644,
         });
+        onProgress?.(
+          30 + Math.floor(((i + 1) / files.length) * 25),
+          `Packing ${cleanName} (${formatBytes(f.data.length)})`
+        );
       }
 
+      onProgress?.(60, `Computing ${password ? 'AES-256 encryption & ' : ''}${format === 'rar50' ? 'RAR 5.0' : 'RAR 4.0'} data stream...`);
+
+      if (isSplit && splitBytes) {
+        onProgress?.(70, `Splitting RAR archive into ${formatBytes(splitBytes)} volumes...`);
+        const rawVolumes: Uint8Array[] = builder.toVolumes();
+        const volumes: ArchiveVolumeItem[] = rawVolumes.map((volBytes, idx) => {
+          const ext = idx === 0 ? '.part1.rar' : `.part${idx + 1}.rar`;
+          return {
+            name: `archive${ext}`,
+            blob: new Blob([volBytes], { type: 'application/vnd.rar' }),
+            size: volBytes.length,
+          };
+        });
+
+        return {
+          data: rawVolumes[0],
+          volumes,
+          format,
+          isEncrypted: !!password,
+          hasEncryptedHeaders: encryptHeaders,
+          recoveryRecordPercent: recoveryPercent,
+        };
+      }
+
+      const archiveBytes: Uint8Array = builder.toBytes();
+      onProgress?.(90, 'RAR container assembled.');
+
       return {
-        data: mainData,
-        volumes,
+        data: archiveBytes,
         format,
         isEncrypted: !!password,
         hasEncryptedHeaders: encryptHeaders,
         recoveryRecordPercent: recoveryPercent,
       };
+    } finally {
+      try {
+        builder.free();
+      } catch {}
     }
-  } catch (serverErr: any) {
-    console.warn('Server RAR endpoint notice:', serverErr?.message, '- Using pure TS RAR fallback...');
+  } catch (err: any) {
+    console.warn('Direct RarBuilder notice:', err?.message, '- Trying fallback...');
   }
 
-  // Fallback 2: Pure TypeScript RAR 4.0 writer
+  // Fallback: Pure TypeScript RAR 4.0 writer
   onProgress?.(85, 'Assembling authentic RAR container...');
   const fallbackBytes = createPureRar4Archive(files);
   return {
@@ -324,28 +377,4 @@ export async function createRarArchive(
     hasEncryptedHeaders: false,
     recoveryRecordPercent: 0,
   };
-}
-
-/**
- * Helper to convert Uint8Array to base64
- */
-function uint8ArrayToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-}
-
-/**
- * Helper to convert base64 to Uint8Array
- */
-function base64ToUint8Array(base64: string): Uint8Array {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
 }

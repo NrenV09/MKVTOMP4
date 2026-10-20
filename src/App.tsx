@@ -47,9 +47,11 @@ import {
   getCachedWasmBlobURL,
   getWasmCacheStats,
   WASM_ENGINE_CACHE_NAME,
+  WASM_RUNTIME_CACHE_NAME,
+  ARCHIVE_RUNTIME_CACHE_NAME,
   WasmCacheStats,
 } from './utils/wasmCache';
-import { preloadArchiveCoresToIDB } from './utils/engineIndexedDBCache';
+import { preloadAllEnginesToIDB } from './utils/engineIndexedDBCache';
 
 import { Header, WorkspaceMode } from './components/Header';
 import { MediaDropzone } from './components/MediaDropzone';
@@ -203,12 +205,22 @@ export default function App() {
       } catch {}
     }
 
-    // 4. Purge temporary browser caches while PRESERVING the WebAssembly engine cache
+    // 4. Preserve all persistent WebAssembly engine & PWA offline caches
     if (typeof window !== 'undefined' && 'caches' in window) {
       try {
+        const preservedCaches = new Set([
+          WASM_ENGINE_CACHE_NAME,
+          WASM_RUNTIME_CACHE_NAME,
+          ARCHIVE_RUNTIME_CACHE_NAME,
+          'local-assets-cache',
+        ]);
         const keys = await window.caches.keys();
         for (const key of keys) {
-          if (key !== WASM_ENGINE_CACHE_NAME) {
+          if (
+            !preservedCaches.has(key) &&
+            !key.startsWith('workbox-') &&
+            !key.includes('wasm')
+          ) {
             await window.caches.delete(key);
           }
         }
@@ -216,7 +228,7 @@ export default function App() {
     }
 
     setIsPurged(true);
-    addLog('system', 'Purged temporary media buffers (WebAssembly engine safely preserved in IndexedDB cache).');
+    addLog('system', 'Purged temporary media buffers (WebAssembly engines safely preserved in browser CacheStorage & IndexedDB).');
     getWasmCacheStats().then(setWasmCacheStats);
   }, [addLog, revokeActiveUrl]);
 
@@ -404,9 +416,20 @@ export default function App() {
   };
 
   useEffect(() => {
-    // Only inspect existing offline cache stats on mount (zero network calls)
-    getWasmCacheStats().then(setWasmCacheStats).catch(() => {});
+    const refreshCacheStats = () => {
+      getWasmCacheStats().then(setWasmCacheStats).catch(() => {});
+    };
+
+    refreshCacheStats();
+    window.addEventListener('wasm-cache-updated', refreshCacheStats);
+
+    // Silently ensure all WebAssembly engines stay persisted in IndexedDB & CacheStorage
+    preloadAllEnginesToIDB()
+      .then(() => refreshCacheStats())
+      .catch(() => {});
+
     return () => {
+      window.removeEventListener('wasm-cache-updated', refreshCacheStats);
       revokeActiveUrl();
     };
   }, [revokeActiveUrl]);
@@ -632,35 +655,116 @@ export default function App() {
     try {
       const ffmpeg = ffmpegRef.current;
 
+      // 1. Write file into WebAssembly MEMFS
+      await ffmpeg.writeFile(virtualIn, await fetchFile(rawFile));
+
+      // 2. If stream codecs haven't been probed yet, run a fast header probe on virtualIn
+      let effectiveMeta: SourceMetadata = sourceMeta;
+      if (!effectiveMeta.videoCodec && !effectiveMeta.audioCodec) {
+        try {
+          probeLogsBuffer.current = [];
+          await ffmpeg.exec(['-i', virtualIn]);
+          const parsed = parseFFmpegProbeLogs(probeLogsBuffer.current);
+          effectiveMeta = {
+            ...effectiveMeta,
+            duration: parsed.duration || effectiveMeta.duration,
+            width: parsed.width || effectiveMeta.width,
+            height: parsed.height || effectiveMeta.height,
+            fps: parsed.fps || effectiveMeta.fps,
+            videoCodec: parsed.videoCodec || effectiveMeta.videoCodec,
+            audioCodec: parsed.audioCodec || effectiveMeta.audioCodec,
+            audioSampleRate: parsed.audioSampleRate || effectiveMeta.audioSampleRate,
+            audioChannels: parsed.audioChannels || effectiveMeta.audioChannels,
+            bitrate: parsed.bitrate || effectiveMeta.bitrate,
+            parsedStreams: parsed.parsedStreams || effectiveMeta.parsedStreams,
+            hasVideo: parsed.hasVideo ?? effectiveMeta.hasVideo,
+            hasAudio: parsed.hasAudio ?? effectiveMeta.hasAudio,
+          };
+          setSourceMeta(effectiveMeta);
+        } catch {}
+      }
+
       // Pipeline selection:
-      const isCopy = config.videoCodec === 'copy';
+      const isVideoTarget = config.targetCategory === 'video' && config.container !== 'gif';
+      const isCopy = isVideoTarget && config.videoCodec === 'copy';
       const isTargetMp4 = config.container === 'mp4';
       const canHardwareWebCodecs =
+        isVideoTarget &&
         !isCopy &&
         config.hardwareAcceleration !== false &&
+        (config.hardwareEngine === 'webgpu' || config.webgpuFilter === 'grayscale') &&
         isTargetMp4 &&
         (hardwareCaps?.webcodecs.hwH264 || hardwareCaps?.webcodecs.available);
 
       let outputBlob: Blob | null = null;
       let executedCommand: string[] = [];
 
-      // 1. Write file into WebAssembly MEMFS
-      await ffmpeg.writeFile(virtualIn, await fetchFile(rawFile));
-
       if (isCopy) {
-        // DIRECT STREAM COPY (Instant passthrough)
+        // DIRECT STREAM COPY (Instant passthrough with automatic smart fallback)
         setTelemetry((prev) => ({
           ...prev,
           accelerationMode: 'Direct Stream Copy (Instant 100x)',
         }));
         addLog('system', 'Direct stream copy enabled. Zero re-encoding passthrough pipeline.');
-        executedCommand = buildFFmpegArgs(virtualIn, virtualOut, config, sourceMeta);
+        executedCommand = buildFFmpegArgs(virtualIn, virtualOut, config, effectiveMeta);
         addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
 
-        const returnCode = await ffmpeg.exec(executedCommand);
+        let returnCode = await ffmpeg.exec(executedCommand);
+
+        // Fallback A: If direct stream copy failed and audio was 'copy', transcode audio to AAC/Opus while keeping video stream copy
+        if (returnCode !== 0 && config.audioCodec === 'copy' && effectiveMeta.hasAudio) {
+          const fallbackAudioCodec = config.container === 'webm' ? 'libopus' : 'aac';
+          addLog(
+            'system',
+            `Audio stream copy incompatible with .${config.container}. Retrying with video stream copy + ${fallbackAudioCodec.toUpperCase()} audio encode...`
+          );
+          try { await ffmpeg.deleteFile(virtualOut); } catch {}
+          executedCommand = buildFFmpegArgs(
+            virtualIn,
+            virtualOut,
+            { ...config, audioCodec: fallbackAudioCodec, audioBitrate: '192k' },
+            effectiveMeta
+          );
+          addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
+          returnCode = await ffmpeg.exec(executedCommand);
+        }
+
+        // Fallback B: If stream copy still failed (e.g. VP8/VP9/WMV video inside MP4), automatically transcode video + audio
+        if (returnCode !== 0) {
+          const fallbackVideoCodec = config.container === 'webm' ? 'libvpx-vp9' : 'libx264';
+          const fallbackAudioCodec =
+            config.audioCodec === 'none'
+              ? 'none'
+              : config.container === 'webm'
+              ? 'libopus'
+              : 'aac';
+          addLog(
+            'system',
+            `Source video codec (${effectiveMeta.videoCodec || 'stream'}) cannot be stream-copied into .${config.container}. Automatically transcoding with ${fallbackVideoCodec}...`
+          );
+          setTelemetry((prev) => ({
+            ...prev,
+            accelerationMode: 'Auto-Transcode Fallback (Multi-Core Wasm)',
+          }));
+          try { await ffmpeg.deleteFile(virtualOut); } catch {}
+          executedCommand = buildFFmpegArgs(
+            virtualIn,
+            virtualOut,
+            {
+              ...config,
+              videoCodec: fallbackVideoCodec,
+              audioCodec: fallbackAudioCodec,
+              speedPreset: 'ultrafast',
+            },
+            effectiveMeta
+          );
+          addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
+          returnCode = await ffmpeg.exec(executedCommand);
+        }
+
         if (returnCode !== 0) {
           throw new Error(
-            `Direct stream copy exited with code ${returnCode}. Source stream is incompatible with .${config.container}. Try selecting WebGPU Hardware Re-encode.`
+            `Conversion exited with code ${returnCode}. Check console logs for stream details.`
           );
         }
 
@@ -676,11 +780,10 @@ export default function App() {
         addLog('system', 'Initializing WebCodecs & WebGPU hardware video pipeline...');
 
         let sourceBlobForHw: Blob = rawFile;
-        // If file is MKV or similar, do a high-speed stream remux to MP4 in memory so browser media decoder can ingest it
         if (extIn.toLowerCase() === '.mkv' || extIn.toLowerCase() === '.avi') {
           addLog('system', 'Pre-flight stream remuxing for hardware video decoder...');
           const tempRemuxOut = `temp_hw_remux_${Date.now()}.mp4`;
-          const remuxArgs = ['-threads', '0', '-i', virtualIn, '-c:v', 'copy', '-c:a', 'copy', '-tag:v', 'hvc1', '-movflags', '+faststart', tempRemuxOut];
+          const remuxArgs = ['-threads', '0', '-i', virtualIn, '-c:v', 'copy', '-c:a', 'aac', '-movflags', '+faststart', tempRemuxOut];
           const remuxCode = await ffmpeg.exec(remuxArgs);
           if (remuxCode === 0) {
             const remuxData = await ffmpeg.readFile(tempRemuxOut);
@@ -703,7 +806,7 @@ export default function App() {
             bitrateBps = parseInt(config.videoBitrate, 10) * 1000;
           }
 
-          outputBlob = await transcodeWithHardwareWebCodecs(sourceBlobForHw, {
+          const hwVideoBlob = await transcodeWithHardwareWebCodecs(sourceBlobForHw, {
             targetWidth,
             targetHeight,
             bitrate: bitrateBps,
@@ -726,6 +829,37 @@ export default function App() {
               });
             },
           });
+
+          // If source has audio and user didn't mute audio, mux audio from virtualIn into hardware video
+          if (effectiveMeta.hasAudio && config.audioCodec !== 'none') {
+            addLog('system', 'Muxing audio stream into hardware-encoded MP4 container...');
+            const hwTempVideo = `hw_video_${Date.now()}.mp4`;
+            await ffmpeg.writeFile(hwTempVideo, await fetchFile(hwVideoBlob));
+            const muxArgs = [
+              '-threads', '0',
+              '-i', hwTempVideo,
+              '-i', virtualIn,
+              '-map', '0:v:0',
+              '-map', '1:a:0?',
+              '-c:v', 'copy',
+              '-c:a', 'aac',
+              '-b:a', config.audioBitrate === 'lossless' ? '256k' : config.audioBitrate,
+              '-movflags', '+faststart',
+              '-shortest',
+              virtualOut,
+            ];
+            const muxCode = await ffmpeg.exec(muxArgs);
+            try { await ffmpeg.deleteFile(hwTempVideo); } catch {}
+            if (muxCode === 0) {
+              const muxedData = await ffmpeg.readFile(virtualOut);
+              outputBlob = new Blob([muxedData as Uint8Array], { type: 'video/mp4' });
+            } else {
+              outputBlob = hwVideoBlob;
+            }
+          } else {
+            outputBlob = hwVideoBlob;
+          }
+
           executedCommand = [
             'webcodecs',
             '--hardware-acceleration=prefer-hardware',
@@ -738,7 +872,7 @@ export default function App() {
             throw hwErr;
           }
           addLog('system', `Hardware encoder fallback (${hwErr?.message || 'hardware unavailable'}). Switching to multi-threaded CPU software.`);
-          executedCommand = buildFFmpegArgs(virtualIn, virtualOut, config, sourceMeta);
+          executedCommand = buildFFmpegArgs(virtualIn, virtualOut, config, effectiveMeta);
           addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
           const returnCode = await ffmpeg.exec(executedCommand);
           if (returnCode !== 0) {
@@ -749,14 +883,38 @@ export default function App() {
           outputBlob = new Blob([outputData as Uint8Array], { type: mimeType });
         }
       } else {
-        // MULTI-THREADED CPU WASM
+        // MULTI-THREADED CPU WASM (Video or Audio conversion)
         setTelemetry((prev) => ({
           ...prev,
           accelerationMode: 'Multi-threaded CPU Wasm',
         }));
-        executedCommand = buildFFmpegArgs(virtualIn, virtualOut, config, sourceMeta);
+        executedCommand = buildFFmpegArgs(virtualIn, virtualOut, config, effectiveMeta);
         addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
-        const returnCode = await ffmpeg.exec(executedCommand);
+        let returnCode = await ffmpeg.exec(executedCommand);
+
+        // If audio stream copy failed during audio extraction or video encode, retry with native container audio codec
+        if (returnCode !== 0 && config.audioCodec === 'copy') {
+          const fallbackAudio =
+            config.container === 'mp3'
+              ? 'libmp3lame'
+              : config.container === 'ogg' || config.container === 'webm'
+              ? 'libopus'
+              : config.container === 'wav'
+              ? 'pcm_s16le'
+              : config.container === 'flac'
+              ? 'flac'
+              : 'aac';
+          addLog('system', `Audio stream copy incompatible with .${config.container}. Retrying with ${fallbackAudio} encoder...`);
+          try { await ffmpeg.deleteFile(virtualOut); } catch {}
+          executedCommand = buildFFmpegArgs(
+            virtualIn,
+            virtualOut,
+            { ...config, audioCodec: fallbackAudio as any },
+            effectiveMeta
+          );
+          returnCode = await ffmpeg.exec(executedCommand);
+        }
+
         if (returnCode !== 0) {
           throw new Error(
             `FFmpeg conversion returned exit code ${returnCode}. Check console telemetry for detailed codec diagnostics.`

@@ -208,6 +208,10 @@ export async function saveComponentToIDB(
       putReq.onerror = () => reject(putReq.error || new Error('Failed to save component to IndexedDB'));
       tx.onerror = () => reject(tx.error || new Error('Transaction error saving component'));
     });
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('wasm-cache-updated'));
+    }
   } catch (err) {
     console.warn(`[IDB Engine] Error saving component "${key}":`, err);
   }
@@ -228,6 +232,9 @@ function deriveLabel(normalizedKey: string): string {
   }
   if (normalizedKey.includes('7zz.wasm')) {
     return '7-Zip WebAssembly Core';
+  }
+  if (normalizedKey.includes('rars_wasm_bg.wasm')) {
+    return 'WinRAR 5.0 WebAssembly Core';
   }
   if (normalizedKey.includes('unrar.wasm')) {
     return 'UnRAR WebAssembly Core';
@@ -364,7 +371,7 @@ import {
 } from './wasmCache';
 
 /**
- * Background preloader to ensure both archive WebAssembly cores (7z & unrar)
+ * Background preloader to ensure archive WebAssembly cores (7z, rars, & unrar)
  * are cached in IndexedDB and CacheStorage for immediate offline use.
  */
 export async function preloadArchiveCoresToIDB(): Promise<void> {
@@ -375,6 +382,7 @@ export async function preloadArchiveCoresToIDB(): Promise<void> {
   try {
     const archiveTargets = [
       { url: '7z/7zz.wasm', label: '7-Zip WebAssembly Core' },
+      { url: 'rar/rars_wasm_bg.wasm', label: 'WinRAR 5.0 WebAssembly Core' },
       { url: 'rar/unrar.wasm', label: 'UnRAR WebAssembly Core' },
     ];
 

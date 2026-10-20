@@ -2,6 +2,8 @@ import { createExtractorFromData } from 'node-unrar-js';
 import { ExtractedArchiveItem, guessMimeType, getPreviewType } from './archiveEngine';
 import { extractWithSevenZip } from './sevenZipEngine';
 import { getComponentFromIDB, saveComponentToIDB } from './engineIndexedDBCache';
+import { getComponentFromCacheStorage, saveComponentToCacheStorage } from './wasmCache';
+import { ensureRarsWasmLoaded, RarFile } from './rarWriter';
 
 let cachedUnrarWasmBinary: ArrayBuffer | null = null;
 
@@ -52,22 +54,15 @@ async function getUnrarWasmBinary(
   }
 
   // 2. Try CacheStorage (and migrate to IndexedDB if found)
-  const CACHE_NAME = 'archive-wasm-runtime-cache';
-  if (typeof window !== 'undefined' && 'caches' in window) {
-    try {
-      const cache = await window.caches.open(CACHE_NAME);
-      const matched = await cache.match('rar/unrar.wasm');
-      if (matched) {
-        const buf = await matched.arrayBuffer();
-        if (isValidWasm(buf)) {
-          cachedUnrarWasmBinary = buf;
-          saveComponentToIDB('rar/unrar.wasm', buf.slice(0), 'application/wasm', 'UnRAR WebAssembly Core').catch(() => {});
-          return buf.slice(0);
-        }
-      }
-    } catch {
-      // ignore
+  try {
+    const cacheItem = await getComponentFromCacheStorage('rar/unrar.wasm');
+    if (cacheItem && isValidWasm(cacheItem.data)) {
+      cachedUnrarWasmBinary = cacheItem.data;
+      saveComponentToIDB('rar/unrar.wasm', cacheItem.data.slice(0), 'application/wasm', 'UnRAR WebAssembly Core').catch(() => {});
+      return cacheItem.data.slice(0);
     }
+  } catch {
+    // ignore
   }
 
   const candidates: string[] = [];
@@ -124,18 +119,10 @@ async function getUnrarWasmBinary(
       }
 
       // 2. Also persist to CacheStorage
-      if (typeof window !== 'undefined' && 'caches' in window) {
-        try {
-          const cache = await window.caches.open(CACHE_NAME);
-          await cache.put(
-            'rar/unrar.wasm',
-            new Response(buf.slice(0), {
-              headers: { 'Content-Type': 'application/wasm' },
-            })
-          );
-        } catch {
-          // ignore
-        }
+      try {
+        await saveComponentToCacheStorage('rar/unrar.wasm', buf.slice(0), 'application/wasm');
+      } catch {
+        // ignore
       }
       return buf.slice(0);
     }
@@ -144,16 +131,108 @@ async function getUnrarWasmBinary(
   throw new Error('Failed to load unrar WebAssembly binary from all sources.');
 }
 
+function dosTimestampToDate(dosTime?: number): Date {
+  if (dosTime === undefined) return new Date();
+  const datePart = dosTime >>> 16;
+  const timePart = dosTime & 0xffff;
+  const day = datePart & 0x1f;
+  const month = (datePart >>> 5) & 0x0f;
+  const year = ((datePart >>> 9) & 0x7f) + 1980;
+  const second = (timePart & 0x1f) * 2;
+  const minute = (timePart >>> 5) & 0x3f;
+  const hour = (timePart >>> 11) & 0x1f;
+  return new Date(Date.UTC(year, Math.max(0, month - 1), Math.max(1, day), hour, minute, second));
+}
+
 /**
- * Extract RAR archive (supporting RAR v1.5, v2, v3, v4, and modern RAR5)
+ * Extract RAR archive (supporting RAR v1.5, v2, v3, v4, and modern RAR5 + AES-256)
  */
 export async function extractRarArchive(
   archiveBytes: Uint8Array,
   password?: string,
   onProgress?: (percent: number, status: string) => void
 ): Promise<ExtractedArchiveItem[]> {
-  onProgress?.(20, 'Loading UnRAR WebAssembly module...');
+  onProgress?.(20, 'Loading WinRAR 5.0 WebAssembly module...');
 
+  // 1. Primary Engine: @bitplane/rars WebAssembly core (RAR 5.0 & RAR 4.0 + AES-256)
+  try {
+    await ensureRarsWasmLoaded(onProgress);
+    const rf = new RarFile(archiveBytes, password || undefined);
+    try {
+      const entries = rf.entries();
+      if (rf.needsPassword && !password) {
+        for (const e of entries) {
+          try { e.free(); } catch {}
+        }
+        throw new Error('ERAR_MISSING_PASSWORD: This RAR archive is password-protected. Please enter the archive password to extract.');
+      }
+
+      const items: ExtractedArchiveItem[] = [];
+      for (let i = 0; i < entries.length; i++) {
+        const info = entries[i];
+        try {
+          if (!info.isDirectory) {
+            if (info.isEncrypted && !password) {
+              throw new Error('ERAR_MISSING_PASSWORD: This RAR archive is password-protected. Please enter the archive password to extract.');
+            }
+            const filePath = info.name.replace(/\\/g, '/').replace(/^\/+/, '');
+            const fileName = filePath.split('/').filter(Boolean).pop() || filePath;
+            const u8Data: Uint8Array = rf.readAt(i, password || undefined);
+            const mime = guessMimeType(fileName);
+            const preview = getPreviewType(fileName);
+            const blob = new Blob([u8Data], { type: mime });
+
+            items.push({
+              id: `rars-item-${i}-${Date.now()}`,
+              path: filePath,
+              name: fileName,
+              size: info.size || u8Data.length,
+              compressedSize: info.packedSize,
+              isDir: false,
+              lastModified: dosTimestampToDate(info.fileTime),
+              mimeType: mime,
+              data: u8Data,
+              url: URL.createObjectURL(blob),
+              previewType: preview,
+            });
+
+            onProgress?.(
+              40 + Math.min(50, Math.floor(((i + 1) / entries.length) * 50)),
+              `Extracted ${fileName} (${info.size || u8Data.length} bytes)`
+            );
+          }
+        } finally {
+          try { info.free(); } catch {}
+        }
+      }
+
+      if (items.length > 0) {
+        return items;
+      }
+    } finally {
+      try { rf.free(); } catch {}
+    }
+  } catch (rarsErr: any) {
+    const msg = String(rarsErr?.message || rarsErr || '');
+    if (
+      msg.includes('ERAR_MISSING_PASSWORD') ||
+      /password is required/i.test(msg)
+    ) {
+      throw new Error('This RAR archive is password-protected. Please enter the archive password to extract.');
+    }
+    if (
+      msg.includes('ERAR_BAD_PASSWORD') ||
+      /wrong password|corrupt encrypted|checksum mismatch/i.test(msg)
+    ) {
+      if (password) {
+        throw new Error('Incorrect RAR password provided. Please check the password and try again.');
+      }
+      throw new Error('This RAR archive is password-protected. Please enter the archive password to extract.');
+    }
+    console.warn('Primary rars WASM engine notice:', msg, '- Trying UnRAR 6.x fallback...');
+  }
+
+  // 2. Secondary Engine: Official UnRAR 6.x WebAssembly (unrar.wasm)
   try {
     const wasmBinary = await getUnrarWasmBinary(onProgress);
     onProgress?.(35, 'Initializing official UnRAR 6.x engine...');
@@ -212,12 +291,10 @@ export async function extractRarArchive(
       return items;
     }
 
-    // If zero items were returned, throw to trigger fallback
-    throw new Error('Zero files returned from primary UnRAR engine');
+    throw new Error('Zero files returned from UnRAR engine');
   } catch (err: any) {
-    console.warn('Primary UnRAR engine notice:', err?.message, '- Trying 7-Zip fallback...');
+    console.warn('UnRAR engine notice:', err?.message, '- Trying 7-Zip fallback...');
 
-    // If it's a missing password error, inform user clearly
     if (err?.message?.includes('ERAR_MISSING_PASSWORD') || err?.message?.includes('ERAR_BAD_PASSWORD')) {
       throw new Error(
         err?.message?.includes('ERAR_BAD_PASSWORD')
@@ -226,7 +303,7 @@ export async function extractRarArchive(
       );
     }
 
-    // Fallback to 7-Zip engine which natively supports RAR4 and RAR5 extraction
+    // 3. Tertiary Fallback: 7-Zip WASM engine
     onProgress?.(40, 'Attempting RAR extraction via 7-Zip WASM core...');
     return await extractWithSevenZip(archiveBytes, 'rar', password, onProgress);
   }
