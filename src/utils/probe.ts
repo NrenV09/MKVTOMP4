@@ -113,13 +113,166 @@ export function getFileExtension(filename: string): string {
 }
 
 /**
- * Attempts fast HTML5 media element inspection as a quick baseline with timeout safeguard
+ * Ultra-lightweight binary slice inspector for large files (> 150 MB).
+ * Reads at most 4 MB from the start (and 4 MB from the end if MP4 moov is at the tail)
+ * so iPadOS Safari / WebKit NEVER maps a 2-3 GB blob:// URL into AVFoundation memory.
+ */
+async function probeLargeFileSlices(file: File, isAudioOnly: boolean): Promise<Partial<SourceMetadata>> {
+  const result: Partial<SourceMetadata> = {
+    hasVideo: !isAudioOnly,
+    hasAudio: true,
+  };
+
+  try {
+    const SLICE_BYTES = 4 * 1024 * 1024; // 4 MB max slice
+    const headBuf = await file.slice(0, Math.min(file.size, SLICE_BYTES)).arrayBuffer();
+    const headU8 = new Uint8Array(headBuf);
+
+    let tailU8: Uint8Array | null = null;
+    if (file.size > SLICE_BYTES * 2) {
+      const tailBuf = await file.slice(file.size - SLICE_BYTES, file.size).arrayBuffer();
+      tailU8 = new Uint8Array(tailBuf);
+    }
+
+    const asciiFrom = (u8: Uint8Array) => {
+      // Sample printable ASCII markers for fast FourCC / EBML codec identification
+      let out = '';
+      const limit = Math.min(u8.length, 1024 * 1024);
+      for (let i = 0; i < limit; i++) {
+        const c = u8[i];
+        out += c >= 32 && c <= 126 ? String.fromCharCode(c) : ' ';
+      }
+      return out;
+    };
+
+    const scanText = asciiFrom(headU8) + (tailU8 ? ' ' + asciiFrom(tailU8) : '');
+
+    // Detect Video Codec from FourCC (MP4/MOV) or CodecID (MKV/WebM)
+    if (!isAudioOnly) {
+      if (scanText.includes('V_MPEGH/ISO/HEVC') || /\b(hvc1|hev1)\b/.test(scanText)) {
+        result.videoCodec = 'hevc';
+      } else if (scanText.includes('V_MPEG4/ISO/AVC') || /\b(avc1|avc3)\b/.test(scanText)) {
+        result.videoCodec = 'h264';
+      } else if (scanText.includes('V_AV1') || /\bav01\b/.test(scanText)) {
+        result.videoCodec = 'av1';
+      } else if (scanText.includes('V_VP9') || /\bvp09\b/.test(scanText)) {
+        result.videoCodec = 'vp9';
+      } else if (scanText.includes('V_VP8') || /\bvp08\b/.test(scanText)) {
+        result.videoCodec = 'vp8';
+      }
+    }
+
+    // Detect Audio Codec from FourCC (MP4/MOV) or CodecID (MKV/WebM)
+    if (scanText.includes('A_AAC') || /\bmp4a\b/.test(scanText)) {
+      result.audioCodec = 'aac';
+    } else if (scanText.includes('A_EAC3') || /\bec-3\b/.test(scanText)) {
+      result.audioCodec = 'eac3';
+    } else if (scanText.includes('A_AC3') || /\bac-3\b/.test(scanText)) {
+      result.audioCodec = 'ac3';
+    } else if (scanText.includes('A_OPUS') || /\bOpus\b/.test(scanText)) {
+      result.audioCodec = 'opus';
+    } else if (scanText.includes('A_VORBIS')) {
+      result.audioCodec = 'vorbis';
+    } else if (scanText.includes('A_FLAC') || /\bfLaC\b/.test(scanText)) {
+      result.audioCodec = 'flac';
+    } else if (scanText.includes('A_MPEG/L3') || /\b\.mp3\b/.test(scanText)) {
+      result.audioCodec = 'mp3';
+    } else if (/\balac\b/.test(scanText)) {
+      result.audioCodec = 'alac';
+    }
+
+    // Parse MP4/MOV 'mvhd' box for exact duration & 'tkhd' for resolution if present
+    const parseMp4Atoms = (u8: Uint8Array) => {
+      const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+      for (let i = 0; i < u8.length - 120; i++) {
+        // 'mvhd' = 0x6d 0x76 0x68 0x64
+        if (
+          !result.duration &&
+          u8[i] === 0x6d &&
+          u8[i + 1] === 0x76 &&
+          u8[i + 2] === 0x68 &&
+          u8[i + 3] === 0x64
+        ) {
+          const version = u8[i + 4];
+          if (version === 0 && i + 24 <= u8.length) {
+            const timescale = view.getUint32(i + 16, false);
+            const durationUnits = view.getUint32(i + 20, false);
+            if (timescale > 0 && durationUnits > 0 && durationUnits < 0xffffffff) {
+              const dur = durationUnits / timescale;
+              if (dur > 0.1 && dur < 86400 * 3) {
+                result.duration = dur;
+              }
+            }
+          } else if (version === 1 && i + 32 <= u8.length) {
+            const timescale = view.getUint32(i + 24, false);
+            const high = view.getUint32(i + 28, false);
+            const low = view.getUint32(i + 32, false);
+            const durationUnits = high * 4294967296 + low;
+            if (timescale > 0 && durationUnits > 0) {
+              const dur = durationUnits / timescale;
+              if (dur > 0.1 && dur < 86400 * 3) {
+                result.duration = dur;
+              }
+            }
+          }
+        }
+        // 'tkhd' = 0x74 0x6b 0x68 0x64
+        if (
+          !result.width &&
+          u8[i] === 0x74 &&
+          u8[i + 1] === 0x6b &&
+          u8[i + 2] === 0x68 &&
+          u8[i + 3] === 0x64
+        ) {
+          const version = u8[i + 4];
+          const widthOffset = version === 1 ? i + 92 : i + 80;
+          if (widthOffset + 8 <= u8.length) {
+            const w = view.getUint16(widthOffset, false);
+            const h = view.getUint16(widthOffset + 4, false);
+            if (w >= 64 && w <= 16384 && h >= 64 && h <= 16384) {
+              result.width = w;
+              result.height = h;
+              result.is4K = w >= 3840 || h >= 2160;
+            }
+          }
+        }
+      }
+    };
+
+    parseMp4Atoms(headU8);
+    if (tailU8 && (!result.duration || !result.width)) {
+      parseMp4Atoms(tailU8);
+    }
+
+    if (result.duration && result.duration > 0) {
+      result.bitrate = Math.round((file.size * 8) / result.duration / 1000);
+      result.isHighBitrate = result.bitrate >= 15000;
+    }
+  } catch {
+    // Ignore slice inspection errors; FFmpeg WORKERFS header probe will inspect streams
+  }
+
+  return result;
+}
+
+/**
+ * Attempts fast HTML5 media element inspection as a quick baseline with timeout safeguard.
+ * For large files (> 150 MB), uses zero-copy 4 MB slice header inspection so iPadOS Safari
+ * never buffers a multi-gigabyte blob:// URL into AVFoundation memory.
  */
 export async function probeMediaElement(file: File): Promise<Partial<SourceMetadata>> {
-  return new Promise((resolve) => {
-    const ext = getFileExtension(file.name);
-    const isAudioOnly = AUDIO_EXTENSIONS.includes(ext) || (file.type ? file.type.startsWith('audio/') : false);
+  const ext = getFileExtension(file.name);
+  const isAudioOnly = AUDIO_EXTENSIONS.includes(ext) || (file.type ? file.type.startsWith('audio/') : false);
 
+  // CRITICAL iPadOS WebKit Jetsam Safeguard:
+  // Never pass a > 150 MB file (e.g. 2-3 GB movie) to URL.createObjectURL + <video src="blob:...">
+  // or non-native containers (.mkv, .avi, .flv, .wmv, .ts) of any large size.
+  const isNonBrowserContainer = ['.mkv', '.avi', '.flv', '.wmv', '.ts', '.m2ts', '.vob'].includes(ext);
+  if (file.size > 150 * 1024 * 1024 || (isNonBrowserContainer && file.size > 25 * 1024 * 1024)) {
+    return probeLargeFileSlices(file, isAudioOnly);
+  }
+
+  return new Promise((resolve) => {
     let url: string;
     try {
       url = URL.createObjectURL(file);
@@ -161,7 +314,6 @@ export async function probeMediaElement(file: File): Promise<Partial<SourceMetad
         resolve(meta);
       };
 
-      // Safeguard against stalled metadata on non-browser native audio formats
       timer = setTimeout(() => {
         finish({
           hasAudio: true,
@@ -212,7 +364,6 @@ export async function probeMediaElement(file: File): Promise<Partial<SourceMetad
         resolve(meta);
       };
 
-      // Safeguard against stalled metadata on non-browser native containers (e.g. MKV, AVI, FLV, WMV, VOB, TS)
       timer = setTimeout(() => {
         finish({
           hasVideo: true,

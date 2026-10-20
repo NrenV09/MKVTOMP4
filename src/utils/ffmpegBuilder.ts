@@ -278,6 +278,7 @@ export function buildFFmpegArgs(
   // VIDEO CONVERSION
   // 1. Video Codec
   const isAppleTarget = config.container === 'mp4' || config.container === 'mov';
+  const isLargeFile = Boolean(source?.size && source.size > 200 * 1024 * 1024);
 
   if (config.videoCodec === 'copy') {
     args.push('-c:v', 'copy');
@@ -289,8 +290,9 @@ export function buildFFmpegArgs(
       args.push('-tag:v', 'hvc1');
     }
 
-    // Faststart: Move moov atom to beginning of file for instant scrubbing and playback on iPad
-    if (isAppleTarget) {
+    // Faststart: Move moov atom to beginning of file for files <= 200 MB.
+    // For multi-gigabyte files (> 200 MB), skip the second-pass full-file rewrite to prevent memory/I/O spikes.
+    if (isAppleTarget && !isLargeFile) {
       args.push('-movflags', '+faststart');
     }
   } else {
@@ -346,8 +348,8 @@ export function buildFFmpegArgs(
       args.push('-tag:v', 'hvc1');
     }
 
-    // Faststart for streaming MP4 on iPadOS Safari & Files app
-    if (isAppleTarget) {
+    // Faststart for streaming MP4 on iPadOS Safari & Files app (skip second-pass rewrite on > 200 MB files)
+    if (isAppleTarget && !isLargeFile) {
       args.push('-movflags', '+faststart');
     }
   }

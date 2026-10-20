@@ -16,7 +16,7 @@ import {
 
 import coreURL from '@ffmpeg/core?url';
 import wasmURL from '@ffmpeg/core/wasm?url';
-import workerURL from '@ffmpeg/ffmpeg/worker?worker&url';
+import workerURL from './vendor/ffmpeg-worker?worker&url';
 
 import coreMTURL from '@ffmpeg/core-mt?url';
 import wasmMTURL from '@ffmpeg/core-mt/wasm?url';
@@ -448,7 +448,7 @@ export default function App() {
 
     addLog('system', `Loaded source file: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
 
-    // 1. Initial fast HTML5 probe
+    // 1. Initial fast probe (4 MB binary slice for >150 MB files, HTML5 metadata for small files)
     const htmlMeta = await probeMediaElement(file);
 
     let initialMeta: SourceMetadata = {
@@ -459,6 +459,11 @@ export default function App() {
       duration: htmlMeta.duration,
       width: htmlMeta.width,
       height: htmlMeta.height,
+      videoCodec: htmlMeta.videoCodec,
+      audioCodec: htmlMeta.audioCodec,
+      bitrate: htmlMeta.bitrate,
+      is4K: htmlMeta.is4K,
+      isHighBitrate: htmlMeta.isHighBitrate,
       hasVideo: isAudioOnly ? false : (htmlMeta.hasVideo ?? true),
       hasAudio: htmlMeta.hasAudio ?? true,
     };
@@ -481,23 +486,35 @@ export default function App() {
         targetCategory: 'video',
         container: 'mp4',
         videoCodec: 'copy',
-        audioCodec: 'copy',
+        audioCodec:
+          htmlMeta.audioCodec && !['aac', 'alac', 'mp3'].includes(htmlMeta.audioCodec.toLowerCase())
+            ? 'aac'
+            : 'copy',
         speedPreset: 'ultrafast',
-        fastStart: true,
+        fastStart: file.size <= 200 * 1024 * 1024,
       }));
     }
 
-    // 2. Comprehensive stream inspection via FFmpeg
+    // 2. Comprehensive stream inspection via FFmpeg WORKERFS (0 MB RAM zero-copy mount)
     if (ffmpegRef.current && ffmpegRef.current.loaded) {
+      const probeMountDir = `/probe_mnt_${Date.now()}`;
+      const tempFileName = `probe${ext || '.media'}`;
+      const probeVirtualPath = `${probeMountDir}/${tempFileName}`;
       try {
         probeLogsBuffer.current = [];
-        const tempName = `probe_${Date.now()}${ext || ''}`;
-        addLog('system', `Probing stream headers for ${file.name}...`);
+        addLog('system', `Probing stream headers for ${file.name} via zero-copy WORKERFS...`);
 
-        // Write small chunk or full file for header parsing
-        await ffmpegRef.current.writeFile(tempName, await fetchFile(file));
-        // Calling ffmpeg -i tempName will dump stream layout to logs and return 1
-        await ffmpegRef.current.exec(['-i', tempName]);
+        await ffmpegRef.current.createDir(probeMountDir);
+        const mounted = await ffmpegRef.current.mount(
+          'WORKERFS' as any,
+          { blobs: [{ name: tempFileName, data: file }] },
+          probeMountDir
+        );
+
+        if (mounted) {
+          // Calling ffmpeg -i probeVirtualPath reads only header slices from disk (0 MB RAM)
+          await ffmpegRef.current.exec(['-i', probeVirtualPath]);
+        }
 
         const parsed = parseFFmpegProbeLogs(probeLogsBuffer.current);
 
@@ -511,12 +528,12 @@ export default function App() {
             width: parsed.width || prev.width,
             height: parsed.height || prev.height,
             fps: parsed.fps || prev.fps,
-            videoCodec: parsed.videoCodec,
-            audioCodec: parsed.audioCodec,
-            audioSampleRate: parsed.audioSampleRate,
-            audioChannels: parsed.audioChannels,
-            bitrate: parsed.bitrate,
-            parsedStreams: parsed.parsedStreams,
+            videoCodec: parsed.videoCodec || prev.videoCodec,
+            audioCodec: parsed.audioCodec || prev.audioCodec,
+            audioSampleRate: parsed.audioSampleRate || prev.audioSampleRate,
+            audioChannels: parsed.audioChannels || prev.audioChannels,
+            bitrate: parsed.bitrate || prev.bitrate,
+            parsedStreams: parsed.parsedStreams || prev.parsedStreams,
             hasVideo: hasV,
             hasAudio: hasA,
           };
@@ -546,7 +563,6 @@ export default function App() {
             addLog('system', `Native ${parsed.videoCodec} stream confirmed. Direct hardware stream copy enabled.`);
           } else {
             // Source requires transcoding (e.g. WMV, VP8, VP9)
-            // Use WebGPU / WebCodecs hardware acceleration with ultrafast fallback
             setConfig((prev) => ({
               ...prev,
               videoCodec: 'libx264',
@@ -559,16 +575,16 @@ export default function App() {
           }
         }
 
-        // Clean up temporary probe file from virtual MEMFS
-        try {
-          await ffmpegRef.current.deleteFile(tempName);
-        } catch {
-          // ignore cleanup err
-        }
-
         addLog('system', 'Stream layout inspection complete.');
-      } catch (err) {
+      } catch {
         // Handled silently since probe logs contain what we need
+      } finally {
+        try {
+          await ffmpegRef.current.unmount(probeMountDir);
+        } catch {}
+        try {
+          await ffmpegRef.current.deleteDir(probeMountDir);
+        } catch {}
       }
     }
 
@@ -646,19 +662,38 @@ export default function App() {
 
     const extIn = sourceMeta.extension || '';
     const extOut = getRecommendedExtension(config.container);
-    const virtualIn = `input_${Date.now()}${extIn}`;
+    const inputMountDir = `/in_mnt_${Date.now()}`;
+    const inputFileName = `input_${Date.now()}${extIn}`;
+    let virtualIn = `${inputMountDir}/${inputFileName}`;
     const virtualOut = `output_${Date.now()}${extOut}`;
-    activeVirtualFiles.current = { inName: virtualIn, outName: virtualOut };
+    activeVirtualFiles.current = {
+      inMountDir: inputMountDir,
+      inName: virtualIn,
+      outName: virtualOut,
+    };
 
-    addLog('system', `Mounting ${rawFile.name} to MEMFS as ${virtualIn}...`);
+    const fileSizeMB = (rawFile.size / 1024 / 1024).toFixed(1);
+    addLog('system', `Mounting ${rawFile.name} (${fileSizeMB} MB) via zero-copy WORKERFS stream (${virtualIn})...`);
 
     try {
       const ffmpeg = ffmpegRef.current;
 
-      // 1. Write file into WebAssembly MEMFS
-      await ffmpeg.writeFile(virtualIn, await fetchFile(rawFile));
+      // 1. Mount input file zero-copy via WORKERFS (0 MB RAM used, streams directly from disk via FileReaderSync)
+      await ffmpeg.createDir(inputMountDir);
+      const isMounted = await ffmpeg.mount(
+        'WORKERFS' as any,
+        { blobs: [{ name: inputFileName, data: rawFile }] },
+        inputMountDir
+      );
 
-      // 2. If stream codecs haven't been probed yet, run a fast header probe on virtualIn
+      if (!isMounted) {
+        // Fallback only if WORKERFS was unavailable
+        virtualIn = inputFileName;
+        activeVirtualFiles.current = { inName: virtualIn, outName: virtualOut };
+        await ffmpeg.writeFile(virtualIn, await fetchFile(rawFile));
+      }
+
+      // 2. If stream codecs haven't been probed yet, run a fast header probe on virtualIn (0 MB RAM via WORKERFS)
       let effectiveMeta: SourceMetadata = sourceMeta;
       if (!effectiveMeta.videoCodec && !effectiveMeta.audioCodec) {
         try {
@@ -684,11 +719,22 @@ export default function App() {
         } catch {}
       }
 
+      // Helper to export output file as a disk/paged Blob without allocating a multi-GB Uint8Array
+      const readOutputAsBlob = async (outPath: string, mime: string): Promise<Blob> => {
+        const res = await ffmpeg.readFile(outPath, `blob:${mime}` as any);
+        if (res instanceof Blob) {
+          return res;
+        }
+        return new Blob([res as Uint8Array], { type: mime });
+      };
+
       // Pipeline selection:
       const isVideoTarget = config.targetCategory === 'video' && config.container !== 'gif';
       const isCopy = isVideoTarget && config.videoCodec === 'copy';
       const isTargetMp4 = config.container === 'mp4';
+      // Disable WebCodecs whole-buffer demuxing for files > 300 MB so multi-GB files always use streaming WORKERFS + OPFS/Paged FS
       const canHardwareWebCodecs =
+        rawFile.size <= 300 * 1024 * 1024 &&
         isVideoTarget &&
         !isCopy &&
         config.hardwareAcceleration !== false &&
@@ -703,9 +749,9 @@ export default function App() {
         // DIRECT STREAM COPY (Instant passthrough with automatic smart fallback)
         setTelemetry((prev) => ({
           ...prev,
-          accelerationMode: 'Direct Stream Copy (Instant 100x)',
+          accelerationMode: 'Direct Stream Copy (Zero-Copy Disk Stream)',
         }));
-        addLog('system', 'Direct stream copy enabled. Zero re-encoding passthrough pipeline.');
+        addLog('system', 'Direct stream copy enabled. Zero re-encoding passthrough pipeline (OPFS / 16 MB Paged Storage).');
         executedCommand = buildFFmpegArgs(virtualIn, virtualOut, config, effectiveMeta);
         addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
 
@@ -768,9 +814,8 @@ export default function App() {
           );
         }
 
-        const outputData = await ffmpeg.readFile(virtualOut);
         const mimeType = getMimeType(config.container);
-        outputBlob = new Blob([outputData as Uint8Array], { type: mimeType });
+        outputBlob = await readOutputAsBlob(virtualOut, mimeType);
       } else if (canHardwareWebCodecs) {
         // WEBGPU & WEBCODECS HARDWARE ACCELERATION
         setTelemetry((prev) => ({
@@ -783,11 +828,10 @@ export default function App() {
         if (extIn.toLowerCase() === '.mkv' || extIn.toLowerCase() === '.avi') {
           addLog('system', 'Pre-flight stream remuxing for hardware video decoder...');
           const tempRemuxOut = `temp_hw_remux_${Date.now()}.mp4`;
-          const remuxArgs = ['-threads', '0', '-i', virtualIn, '-c:v', 'copy', '-c:a', 'aac', '-movflags', '+faststart', tempRemuxOut];
+          const remuxArgs = ['-threads', '0', '-i', virtualIn, '-c:v', 'copy', '-c:a', 'aac', tempRemuxOut];
           const remuxCode = await ffmpeg.exec(remuxArgs);
           if (remuxCode === 0) {
-            const remuxData = await ffmpeg.readFile(tempRemuxOut);
-            sourceBlobForHw = new Blob([remuxData as Uint8Array], { type: 'video/mp4' });
+            sourceBlobForHw = await readOutputAsBlob(tempRemuxOut, 'video/mp4');
             try { await ffmpeg.deleteFile(tempRemuxOut); } catch {}
           }
         }
@@ -830,31 +874,40 @@ export default function App() {
             },
           });
 
-          // If source has audio and user didn't mute audio, mux audio from virtualIn into hardware video
+          // If source has audio and user didn't mute audio, mux audio from virtualIn into hardware video via WORKERFS
           if (effectiveMeta.hasAudio && config.audioCodec !== 'none') {
             addLog('system', 'Muxing audio stream into hardware-encoded MP4 container...');
-            const hwTempVideo = `hw_video_${Date.now()}.mp4`;
-            await ffmpeg.writeFile(hwTempVideo, await fetchFile(hwVideoBlob));
-            const muxArgs = [
-              '-threads', '0',
-              '-i', hwTempVideo,
-              '-i', virtualIn,
-              '-map', '0:v:0',
-              '-map', '1:a:0?',
-              '-c:v', 'copy',
-              '-c:a', 'aac',
-              '-b:a', config.audioBitrate === 'lossless' ? '256k' : config.audioBitrate,
-              '-movflags', '+faststart',
-              '-shortest',
-              virtualOut,
-            ];
-            const muxCode = await ffmpeg.exec(muxArgs);
-            try { await ffmpeg.deleteFile(hwTempVideo); } catch {}
-            if (muxCode === 0) {
-              const muxedData = await ffmpeg.readFile(virtualOut);
-              outputBlob = new Blob([muxedData as Uint8Array], { type: 'video/mp4' });
-            } else {
-              outputBlob = hwVideoBlob;
+            const hwMountDir = `/hw_mnt_${Date.now()}`;
+            const hwVideoName = `hw_video_${Date.now()}.mp4`;
+            const hwVirtualPath = `${hwMountDir}/${hwVideoName}`;
+            await ffmpeg.createDir(hwMountDir);
+            await ffmpeg.mount(
+              'WORKERFS' as any,
+              { blobs: [{ name: hwVideoName, data: hwVideoBlob }] },
+              hwMountDir
+            );
+            try {
+              const muxArgs = [
+                '-threads', '0',
+                '-i', hwVirtualPath,
+                '-i', virtualIn,
+                '-map', '0:v:0',
+                '-map', '1:a:0?',
+                '-c:v', 'copy',
+                '-c:a', 'aac',
+                '-b:a', config.audioBitrate === 'lossless' ? '256k' : config.audioBitrate,
+                '-shortest',
+                virtualOut,
+              ];
+              const muxCode = await ffmpeg.exec(muxArgs);
+              if (muxCode === 0) {
+                outputBlob = await readOutputAsBlob(virtualOut, 'video/mp4');
+              } else {
+                outputBlob = hwVideoBlob;
+              }
+            } finally {
+              try { await ffmpeg.unmount(hwMountDir); } catch {}
+              try { await ffmpeg.deleteDir(hwMountDir); } catch {}
             }
           } else {
             outputBlob = hwVideoBlob;
@@ -878,9 +931,8 @@ export default function App() {
           if (returnCode !== 0) {
             throw new Error(`FFmpeg conversion returned exit code ${returnCode}.`);
           }
-          const outputData = await ffmpeg.readFile(virtualOut);
           const mimeType = getMimeType(config.container);
-          outputBlob = new Blob([outputData as Uint8Array], { type: mimeType });
+          outputBlob = await readOutputAsBlob(virtualOut, mimeType);
         }
       } else {
         // MULTI-THREADED CPU WASM (Video or Audio conversion)
@@ -920,24 +972,24 @@ export default function App() {
             `FFmpeg conversion returned exit code ${returnCode}. Check console telemetry for detailed codec diagnostics.`
           );
         }
-        const outputData = await ffmpeg.readFile(virtualOut);
         const mimeType = getMimeType(config.container);
-        outputBlob = new Blob([outputData as Uint8Array], { type: mimeType });
+        outputBlob = await readOutputAsBlob(virtualOut, mimeType);
       }
 
-      // Unlink input file immediately to free virtual memory before loading output
+      // Unmount WORKERFS input stream immediately
       try {
-        await ffmpeg.deleteFile(virtualIn);
-        addLog('system', `Unlinked virtual input buffer ${virtualIn}.`);
+        await ffmpeg.unmount(inputMountDir);
+        await ffmpeg.deleteDir(inputMountDir);
+        addLog('system', `Unmounted zero-copy input stream ${inputMountDir}.`);
       } catch {
-        // ignore
+        try { await ffmpeg.deleteFile(virtualIn); } catch {}
       }
 
       if (!outputBlob) {
         throw new Error('No output media blob generated.');
       }
 
-      // 5. Read generated output from virtual filesystem
+      // 5. Create download object URL from disk-backed / paged Blob
       const outputUrl = URL.createObjectURL(outputBlob);
       activeOutputUrlRef.current = outputUrl;
       setIsPurged(false);
@@ -959,14 +1011,18 @@ export default function App() {
 
       addLog('system', `Conversion finished successfully in ${(elapsed / 1000).toFixed(1)}s.`);
 
-      // 6. Cleanup output file from MEMFS
+      // 6. Cleanup output file node from virtual FS
       try {
         await ffmpeg.deleteFile(virtualOut);
-        addLog('system', `MEMFS garbage collection: Unlinked ${virtualOut}.`);
+        addLog('system', `Virtual FS garbage collection: Unlinked ${virtualOut}.`);
       } catch (cleanupErr) {
         console.warn('Cleanup non-fatal warning:', cleanupErr);
       }
     } catch (err: any) {
+      try {
+        await ffmpegRef.current?.unmount(inputMountDir);
+        await ffmpegRef.current?.deleteDir(inputMountDir);
+      } catch {}
       console.error('Conversion failed:', err);
       const errorMsg = err?.message || 'Media conversion failed.';
       setConversionError(errorMsg);

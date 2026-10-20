@@ -30,9 +30,11 @@ export const ResultPanel: React.FC<ResultPanelProps> = ({
   onPurgeCache,
   isPurged = false,
 }) => {
-  const [autoPurge, setAutoPurge] = useState(true);
+  const isLargeOutput = result.outputSize > 150 * 1024 * 1024;
+  const [autoPurge, setAutoPurge] = useState(!isLargeOutput);
   const [downloaded, setDownloaded] = useState(false);
   const [countdown, setCountdown] = useState<number | null>(null);
+  const [forcePreview, setForcePreview] = useState(false);
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -111,8 +113,8 @@ export const ResultPanel: React.FC<ResultPanelProps> = ({
     setDownloaded(true);
 
     if (autoPurge) {
-      // 3-second grace period for download pipe to start before revoking blob URL
-      setCountdown(3);
+      // Allow enough time for iPadOS Safari download confirmation sheet + stream start
+      setCountdown(isLargeOutput ? 20 : 8);
     }
   };
 
@@ -264,12 +266,41 @@ export const ResultPanel: React.FC<ResultPanelProps> = ({
         {!isPurged ? (
           <>
             {isVideo && result.container !== 'gif' && (
-              <video
-                ref={videoRef}
-                src={result.outputUrl}
-                controls
-                className="w-full max-h-72 rounded-md bg-black border border-zinc-850"
-              />
+              isLargeOutput && !forcePreview ? (
+                <div className="p-5 text-center space-y-2.5 border border-zinc-800 rounded-md bg-zinc-900/40">
+                  <ShieldCheck className="w-7 h-7 text-emerald-400 mx-auto" />
+                  <div className="text-zinc-200 font-sans font-medium text-sm">
+                    Large File RAM Protection Active ({formatBytes(result.outputSize)})
+                  </div>
+                  <div className="text-zinc-400 text-[11px] max-w-md mx-auto">
+                    In-browser video preview is paused by default for multi-hundred-megabyte and multi-gigabyte files to prevent iPadOS Safari / WebKit from buffering the entire file into RAM before download.
+                  </div>
+                  <div className="pt-1 flex items-center justify-center gap-2">
+                    <button
+                      onClick={handleDownload}
+                      className="px-4 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-sans font-semibold text-xs transition-colors flex items-center gap-1.5"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Download {formatBytes(result.outputSize)} File</span>
+                    </button>
+                    <button
+                      onClick={() => setForcePreview(true)}
+                      className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 text-xs transition-colors"
+                    >
+                      Load Video Preview Anyway
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <video
+                  ref={videoRef}
+                  src={result.outputUrl}
+                  preload="metadata"
+                  controls
+                  playsInline
+                  className="w-full max-h-72 rounded-md bg-black border border-zinc-850"
+                />
+              )
             )}
 
             {result.container === 'gif' && (
