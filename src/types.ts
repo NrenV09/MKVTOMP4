@@ -46,6 +46,70 @@ export type AudioBitrate = '64k' | '96k' | '128k' | '192k' | '256k' | '320k' | '
 
 export type ChannelLayout = 'source' | 'mono' | 'stereo' | '5.1';
 
+export type SubtitleHandlingMode = 'convert' | 'copy' | 'drop';
+
+export interface VideoTrackInfo {
+  streamIndex: number; // global stream index e.g. 0
+  typeIndex: number; // video stream specifier index e.g. 0 for 0:v:0
+  codec: string;
+  profile?: string;
+  pixelFormat?: string;
+  width?: number;
+  height?: number;
+  fps?: number;
+  bitrate?: number; // in kbps
+  language?: string;
+  title?: string;
+  isDefault?: boolean;
+  isForced?: boolean;
+  is10Bit?: boolean;
+  rawInfo: string;
+}
+
+export interface AudioTrackInfo {
+  streamIndex: number; // global stream index e.g. 1
+  typeIndex: number; // audio stream specifier index e.g. 0 for 0:a:0
+  codec: string;
+  profile?: string;
+  sampleRate?: number;
+  channels?: number;
+  channelLayout?: string;
+  bitrate?: number; // in kbps
+  language?: string;
+  title?: string;
+  isDefault?: boolean;
+  isForced?: boolean;
+  isMp4Compatible: boolean;
+  rawInfo: string;
+}
+
+export interface SubtitleTrackInfo {
+  streamIndex: number; // global stream index e.g. 2
+  typeIndex: number; // subtitle stream specifier index e.g. 0 for 0:s:0
+  codec: string; // e.g. 'subrip', 'ass', 'webvtt', 'mov_text', 'hdmv_pgs_subtitle', 'dvd_subtitle'
+  formatType: 'text' | 'bitmap';
+  language?: string;
+  title?: string;
+  isDefault?: boolean;
+  isForced?: boolean;
+  rawInfo: string;
+}
+
+export interface ChapterInfo {
+  index: number;
+  start: number; // in seconds
+  end: number; // in seconds
+  title?: string;
+}
+
+export interface AttachmentInfo {
+  streamIndex: number;
+  typeIndex: number;
+  codec: string;
+  filename?: string;
+  mimetype?: string;
+}
+
 export interface SourceMetadata {
   name: string;
   size: number;
@@ -67,6 +131,12 @@ export interface SourceMetadata {
   is4K?: boolean;
   isHighBitrate?: boolean;
   parsedStreams?: string[];
+  // Detailed multi-track inspection
+  videoTracks?: VideoTrackInfo[];
+  audioTracks?: AudioTrackInfo[];
+  subtitleTracks?: SubtitleTrackInfo[];
+  chapters?: ChapterInfo[];
+  attachments?: AttachmentInfo[];
 }
 
 export interface EncodingConfig {
@@ -85,6 +155,13 @@ export interface EncodingConfig {
   audioBitrate: AudioBitrate;
   audioChannels: ChannelLayout;
   audioSampleRate: 'source' | '48000' | '44100';
+  // Multi-track selection & smart remuxing
+  selectedVideoTrackIndices?: number[]; // 0:v:X typeIndices
+  selectedAudioTrackIndices?: number[]; // 0:a:X typeIndices
+  selectedSubtitleTrackIndices?: number[]; // 0:s:X typeIndices
+  subtitleMode?: SubtitleHandlingMode;
+  preserveMetadataTags?: boolean;
+  conditionalAudioTranscode?: boolean;
   // Hardware & Apple Silicon Optimization
   appleOptimized?: boolean;
   fastStart?: boolean;
@@ -125,3 +202,11 @@ export interface ConversionResult {
   elapsedMs: number;
   command: string[];
 }
+
+export interface FFmpegDiagnostic {
+  title: string;
+  explanation: string;
+  suggestion: string;
+  code?: number;
+}
+

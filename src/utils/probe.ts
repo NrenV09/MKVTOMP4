@@ -1,16 +1,58 @@
-import { SourceMetadata } from '../types';
+import {
+  SourceMetadata,
+  VideoTrackInfo,
+  AudioTrackInfo,
+  SubtitleTrackInfo,
+  ChapterInfo,
+  AttachmentInfo,
+} from '../types';
+
+const BITMAP_SUBTITLE_CODECS = [
+  'hdmv_pgs_subtitle',
+  'pgssub',
+  'pgs',
+  'dvd_subtitle',
+  'dvdsub',
+  'vobsub',
+  'dvb_subtitle',
+  'dvbsub',
+  'xsub',
+];
+
+export function isBitmapSubtitleCodec(codec: string): boolean {
+  const c = (codec || '').toLowerCase();
+  return BITMAP_SUBTITLE_CODECS.some((b) => c.includes(b));
+}
+
+export function isMp4CompatibleAudioCodec(codec: string): boolean {
+  const c = (codec || '').toLowerCase();
+  return ['aac', 'mp3', 'ac3', 'eac3', 'alac', 'mp4a'].some((a) => c.includes(a));
+}
 
 /**
  * Parses FFmpeg stderr logs produced during inspection (-i input)
+ * Extracts all video tracks, audio tracks, subtitle tracks, chapters, and attachments.
  */
 export function parseFFmpegProbeLogs(logs: string[]): Partial<SourceMetadata> {
+  const videoTracks: VideoTrackInfo[] = [];
+  const audioTracks: AudioTrackInfo[] = [];
+  const subtitleTracks: SubtitleTrackInfo[] = [];
+  const chapters: ChapterInfo[] = [];
+  const attachments: AttachmentInfo[] = [];
+
   const meta: Partial<SourceMetadata> = {
     hasVideo: false,
     hasAudio: false,
     parsedStreams: [],
+    videoTracks,
+    audioTracks,
+    subtitleTracks,
+    chapters,
+    attachments,
   };
 
   const combined = logs.join('\n');
+  const allLines = combined.split('\n');
 
   // Match Duration: 00:01:23.45, start: 0.000000, bitrate: 2450 kb/s
   const durationMatch = combined.match(/Duration:\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/i);
@@ -27,71 +69,263 @@ export function parseFFmpegProbeLogs(logs: string[]): Partial<SourceMetadata> {
     meta.bitrate = parseInt(bitrateMatch[1], 10);
   }
 
-  // Find Streams
-  // Stream #0:0(eng): Video: h264 (High), yuv420p(progressive), 1920x1080 [SAR 1:1 DAR 16:9], 23.98 fps
-  // Stream #0:1(eng): Audio: aac (LC), 48000 Hz, stereo, fltp, 128 kb/s
-  const streamLines = combined.split('\n').filter((l) => l.includes('Stream #'));
-  meta.parsedStreams = streamLines.map((l) => l.trim());
+  let videoTypeCounter = 0;
+  let audioTypeCounter = 0;
+  let subtitleTypeCounter = 0;
+  let attachmentTypeCounter = 0;
 
-  for (const line of streamLines) {
-    if (line.includes('Video:')) {
-      meta.hasVideo = true;
-      const videoPart = line.split('Video:')[1];
-      if (videoPart) {
-        const parts = videoPart.split(',').map((p) => p.trim());
-        meta.videoCodec = parts[0]?.split(' ')[0]?.toLowerCase();
+  let activeBlock:
+    | { kind: 'video'; item: VideoTrackInfo }
+    | { kind: 'audio'; item: AudioTrackInfo }
+    | { kind: 'subtitle'; item: SubtitleTrackInfo }
+    | { kind: 'attachment'; item: AttachmentInfo }
+    | { kind: 'chapter'; item: ChapterInfo }
+    | null = null;
 
-        // Resolution: e.g. 1920x1080 or 1280x720
-        for (const part of parts) {
-          const resMatch = part.match(/(\d{3,5})x(\d{3,5})/);
-          if (resMatch) {
-            meta.width = parseInt(resMatch[1], 10);
-            meta.height = parseInt(resMatch[2], 10);
-          }
-          // FPS
-          const fpsMatch = part.match(/(\d+(?:\.\d+)?)\s*fps/);
-          if (fpsMatch) {
-            meta.fps = Math.round(parseFloat(fpsMatch[1]));
-          }
-          // Pixel Format (e.g. yuv420p, yuv420p10le, yuv444p)
-          const pixMatch = part.match(/(yuv[\w]+)/i);
-          if (pixMatch) {
-            meta.pixelFormat = pixMatch[1].toLowerCase();
-          }
-        }
+  for (let i = 0; i < allLines.length; i++) {
+    const rawLine = allLines[i];
+    const trimmed = rawLine.trim();
 
-        // 10-bit / HDR Detection
-        const is10 = line.includes('10le') || line.includes('Main 10') || line.includes('High 10') || (meta.pixelFormat && meta.pixelFormat.includes('10'));
-        meta.is10Bit = Boolean(is10);
-
-        // 4K UHD Detection
-        const is4k = (meta.width && meta.width >= 3840) || (meta.height && meta.height >= 2160);
-        meta.is4K = Boolean(is4k);
-
-        // High Bitrate Detection (>15000 kbps)
-        if (meta.bitrate && meta.bitrate >= 15000) {
-          meta.isHighBitrate = true;
-        }
-      }
+    // Parse Chapter lines:
+    // Chapter #0:0: start 0.000000, end 342.120000
+    const chapterMatch = trimmed.match(/Chapter #0:(\d+):\s*start\s*([\d.]+),\s*end\s*([\d.]+)/i);
+    if (chapterMatch) {
+      const chap: ChapterInfo = {
+        index: parseInt(chapterMatch[1], 10),
+        start: parseFloat(chapterMatch[2]),
+        end: parseFloat(chapterMatch[3]),
+      };
+      chapters.push(chap);
+      activeBlock = { kind: 'chapter', item: chap };
+      continue;
     }
 
-    if (line.includes('Audio:')) {
-      meta.hasAudio = true;
-      const audioPart = line.split('Audio:')[1];
-      if (audioPart) {
-        const parts = audioPart.split(',').map((p) => p.trim());
-        meta.audioCodec = parts[0]?.split(' ')[0]?.toLowerCase();
+    // Parse Stream lines:
+    // Stream #0:0(eng): Video: hevc (Main 10), yuv420p10le(tv), 3840x2160, 23.98 fps (default)
+    // Stream #0:1[0x1100](jpn): Audio: dts (DTS-HD MA), 48000 Hz, 5.1(side), s32p (default)
+    // Stream #0:2(eng): Subtitle: subrip (default) (forced)
+    // Stream #0:3: Attachment: ttf
+    const streamMatch = trimmed.match(
+      /^Stream #0:(\d+)(?:\[[^\]]+\])?(?:\(([a-zA-Z0-9_-]+)\))?:\s*(Video|Audio|Subtitle|Attachment|Data):\s*(.*)$/i
+    );
+
+    if (streamMatch) {
+      meta.parsedStreams!.push(trimmed);
+      const streamIndex = parseInt(streamMatch[1], 10);
+      const langRaw = streamMatch[2] ? streamMatch[2].toLowerCase() : undefined;
+      const language = langRaw && langRaw !== 'und' ? langRaw : undefined;
+      const streamKind = streamMatch[3].toLowerCase();
+      const details = streamMatch[4] || '';
+
+      const isDefault = /\(default\)/i.test(details);
+      const isForced = /\(forced\)/i.test(details);
+      const cleanDetails = details.replace(/\((default|forced|visual impaired|hearing impaired|original|comment)\)/gi, '').trim();
+      const parts = cleanDetails.split(',').map((p) => p.trim());
+      const firstToken = parts[0] || '';
+      const codec = (firstToken.split(' ')[0] || 'unknown').toLowerCase();
+      const profileMatch = firstToken.match(/\(([^)]+)\)/);
+      const profile = profileMatch ? profileMatch[1] : undefined;
+
+      if (streamKind === 'video') {
+        // Ignore attached cover art marked as mjpeg/png video unless it's the only video stream
+        const isAttachedPic = /\(attached pic\)/i.test(details);
+        let width: number | undefined;
+        let height: number | undefined;
+        let fps: number | undefined;
+        let pixelFormat: string | undefined;
+        let streamBitrate: number | undefined;
 
         for (const part of parts) {
-          // Sample rate: e.g. 48000 Hz
+          const resMatch = part.match(/(\d{2,5})x(\d{2,5})/);
+          if (resMatch) {
+            width = parseInt(resMatch[1], 10);
+            height = parseInt(resMatch[2], 10);
+          }
+          const fpsMatch = part.match(/(\d+(?:\.\d+)?)\s*fps/i);
+          if (fpsMatch) {
+            fps = Math.round(parseFloat(fpsMatch[1]) * 100) / 100;
+          }
+          const pixMatch = part.match(/(yuv[\w]+|rgb[\w]+|bgr[\w]+|nv12|p010[\w]*)/i);
+          if (pixMatch) {
+            pixelFormat = pixMatch[1].toLowerCase();
+          }
+          const brMatch = part.match(/(\d+)\s*kb\/s/i);
+          if (brMatch) {
+            streamBitrate = parseInt(brMatch[1], 10);
+          }
+        }
+
+        const is10Bit = Boolean(
+          details.includes('10le') ||
+            details.includes('Main 10') ||
+            details.includes('High 10') ||
+            (pixelFormat && pixelFormat.includes('10'))
+        );
+
+        if (!isAttachedPic) {
+          const vTrack: VideoTrackInfo = {
+            streamIndex,
+            typeIndex: videoTypeCounter++,
+            codec,
+            profile,
+            pixelFormat,
+            width,
+            height,
+            fps,
+            bitrate: streamBitrate,
+            language,
+            isDefault,
+            isForced,
+            is10Bit,
+            rawInfo: cleanDetails,
+          };
+          videoTracks.push(vTrack);
+          activeBlock = { kind: 'video', item: vTrack };
+
+          // Populate primary video metadata from first video track
+          if (!meta.hasVideo) {
+            meta.hasVideo = true;
+            meta.videoCodec = codec;
+            meta.width = width;
+            meta.height = height;
+            meta.fps = fps ? Math.round(fps) : undefined;
+            meta.pixelFormat = pixelFormat;
+            meta.is10Bit = is10Bit;
+            meta.is4K = Boolean((width && width >= 3840) || (height && height >= 2160));
+            if ((meta.bitrate && meta.bitrate >= 15000) || (streamBitrate && streamBitrate >= 15000)) {
+              meta.isHighBitrate = true;
+            }
+          }
+        } else {
+          // Treat attached cover image as attachment
+          const att: AttachmentInfo = {
+            streamIndex,
+            typeIndex: attachmentTypeCounter++,
+            codec,
+            filename: `cover_art.${codec === 'png' ? 'png' : 'jpg'}`,
+            mimetype: codec === 'png' ? 'image/png' : 'image/jpeg',
+          };
+          attachments.push(att);
+          activeBlock = { kind: 'attachment', item: att };
+        }
+      } else if (streamKind === 'audio') {
+        let sampleRate: number | undefined;
+        let channels: number | undefined;
+        let channelLayout: string | undefined;
+        let streamBitrate: number | undefined;
+
+        for (const part of parts) {
           const srMatch = part.match(/(\d{4,6})\s*Hz/i);
           if (srMatch) {
-            meta.audioSampleRate = parseInt(srMatch[1], 10);
+            sampleRate = parseInt(srMatch[1], 10);
           }
-          // Channels
-          if (part.includes('stereo')) meta.audioChannels = 2;
-          else if (part.includes('mono')) meta.audioChannels = 1;
-          else if (part.includes('5.1')) meta.audioChannels = 6;
+          const brMatch = part.match(/(\d+)\s*kb\/s/i);
+          if (brMatch) {
+            streamBitrate = parseInt(brMatch[1], 10);
+          }
+          if (part.includes('stereo') || part === '2 channels') {
+            channels = 2;
+            channelLayout = 'Stereo (2.0)';
+          } else if (part.includes('mono') || part === '1 channels') {
+            channels = 1;
+            channelLayout = 'Mono (1.0)';
+          } else if (part.includes('5.1')) {
+            channels = 6;
+            channelLayout = '5.1 Surround';
+          } else if (part.includes('7.1')) {
+            channels = 8;
+            channelLayout = '7.1 Surround';
+          } else if (part.includes('quad') || part.includes('4.0')) {
+            channels = 4;
+            channelLayout = 'Quad (4.0)';
+          }
+        }
+
+        const aTrack: AudioTrackInfo = {
+          streamIndex,
+          typeIndex: audioTypeCounter++,
+          codec,
+          profile,
+          sampleRate,
+          channels,
+          channelLayout,
+          bitrate: streamBitrate,
+          language,
+          isDefault,
+          isForced,
+          isMp4Compatible: isMp4CompatibleAudioCodec(codec),
+          rawInfo: cleanDetails,
+        };
+        audioTracks.push(aTrack);
+        activeBlock = { kind: 'audio', item: aTrack };
+
+        if (!meta.hasAudio) {
+          meta.hasAudio = true;
+          meta.audioCodec = codec;
+          meta.audioSampleRate = sampleRate;
+          meta.audioChannels = channels;
+        }
+      } else if (streamKind === 'subtitle') {
+        const formatType = isBitmapSubtitleCodec(codec) ? 'bitmap' : 'text';
+        const sTrack: SubtitleTrackInfo = {
+          streamIndex,
+          typeIndex: subtitleTypeCounter++,
+          codec,
+          formatType,
+          language,
+          isDefault,
+          isForced,
+          rawInfo: cleanDetails,
+        };
+        subtitleTracks.push(sTrack);
+        activeBlock = { kind: 'subtitle', item: sTrack };
+      } else if (streamKind === 'attachment') {
+        const att: AttachmentInfo = {
+          streamIndex,
+          typeIndex: attachmentTypeCounter++,
+          codec,
+        };
+        attachments.push(att);
+        activeBlock = { kind: 'attachment', item: att };
+      } else {
+        activeBlock = null;
+      }
+      continue;
+    }
+
+    // Parse Metadata key/value lines inside an active Stream or Chapter block
+    if (activeBlock) {
+      // If we hit a top-level section header like "Input #", "Output #", "Stream mapping:", exit block
+      if (/^(Input #|Output #|Stream mapping:|Press \[q\])/i.test(trimmed)) {
+        activeBlock = null;
+        continue;
+      }
+
+      const kvMatch = trimmed.match(/^([A-Za-z0-9_-]+)\s*:\s*(.+)$/);
+      if (kvMatch) {
+        const key = kvMatch[1].toLowerCase();
+        const val = kvMatch[2].trim();
+
+        if (key === 'title' && val) {
+          if (
+            activeBlock.kind === 'video' ||
+            activeBlock.kind === 'audio' ||
+            activeBlock.kind === 'subtitle' ||
+            activeBlock.kind === 'chapter'
+          ) {
+            if (!activeBlock.item.title) {
+              activeBlock.item.title = val;
+            }
+          }
+        } else if (key === 'filename' && activeBlock.kind === 'attachment') {
+          activeBlock.item.filename = val;
+        } else if (key === 'mimetype' && activeBlock.kind === 'attachment') {
+          activeBlock.item.mimetype = val;
+        } else if (key.startsWith('bps') && (activeBlock.kind === 'video' || activeBlock.kind === 'audio')) {
+          const bps = parseInt(val, 10);
+          if (!isNaN(bps) && bps > 0 && !activeBlock.item.bitrate) {
+            activeBlock.item.bitrate = Math.round(bps / 1000);
+          }
         }
       }
     }

@@ -33,8 +33,11 @@ export const ResultPanel: React.FC<ResultPanelProps> = ({
   const isLargeOutput = result.outputSize > 150 * 1024 * 1024;
   const [autoPurge, setAutoPurge] = useState(!isLargeOutput);
   const [downloaded, setDownloaded] = useState(false);
+  const [isStreamingSave, setIsStreamingSave] = useState(false);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [forcePreview, setForcePreview] = useState(false);
+  const supportsFileSystemAccess =
+    typeof window !== 'undefined' && typeof (window as any).showSaveFilePicker === 'function';
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -102,7 +105,7 @@ export const ResultPanel: React.FC<ResultPanelProps> = ({
   const handleDownload = () => {
     if (isPurged) return;
 
-    // Trigger download
+    // Trigger direct Blob URL download without duplicating output in memory
     const link = document.createElement('a');
     link.href = result.outputUrl;
     link.download = result.outputName;
@@ -118,6 +121,33 @@ export const ResultPanel: React.FC<ResultPanelProps> = ({
     }
   };
 
+  const handleStreamSaveToDisk = async () => {
+    if (isPurged || !supportsFileSystemAccess) {
+      handleDownload();
+      return;
+    }
+
+    try {
+      setIsStreamingSave(true);
+      const handle = await (window as any).showSaveFilePicker({
+        suggestedName: result.outputName,
+      });
+      const writable = await handle.createWritable();
+      await result.blob.stream().pipeTo(writable);
+      setDownloaded(true);
+      if (autoPurge) {
+        setCountdown(5);
+      }
+    } catch (err: any) {
+      // If user did not cancel the picker manually, fall back to standard Blob URL download
+      if (err?.name !== 'AbortError') {
+        handleDownload();
+      }
+    } finally {
+      setIsStreamingSave(false);
+    }
+  };
+
   return (
     <div className="bg-[#121215] border border-zinc-800 rounded-xl p-5 font-mono text-xs space-y-5 shadow-2xl">
       {/* Status Banner */}
@@ -127,14 +157,19 @@ export const ResultPanel: React.FC<ResultPanelProps> = ({
             <CheckCircle2 className="w-5 h-5" />
           </div>
           <div>
-            <div className="text-zinc-100 font-sans font-semibold text-base">
-              Conversion Completed
+            <div className="text-zinc-100 font-sans font-semibold text-base flex items-center gap-2">
+              <span>Conversion Completed</span>
+              {downloaded && (
+                <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-mono uppercase">
+                  Saved
+                </span>
+              )}
             </div>
-            <div className="text-zinc-500 text-[11px] flex items-center gap-2 mt-0.5">
+            <div className="text-zinc-500 text-[11px] flex items-center gap-2 mt-0.5 tabular-nums">
               <span>Duration: {formatDuration(result.elapsedMs / 1000)}</span>
               <span>•</span>
               <span className={isPurged ? 'text-zinc-400' : 'text-emerald-400'}>
-                {isPurged ? 'Cache Purged (0 B in memory)' : 'Ready for download'}
+                {isPurged ? 'Cache Purged (0 B in memory)' : 'Ready for zero-copy download'}
               </span>
             </div>
           </div>
@@ -146,12 +181,24 @@ export const ResultPanel: React.FC<ResultPanelProps> = ({
             <>
               <button
                 onClick={handleDownload}
-                aria-label={`Download converted file ${result.fileName}`}
+                aria-label={`Download converted file ${result.outputName}`}
                 className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-sans font-semibold text-sm transition-all shadow-lg shadow-emerald-500/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
               >
                 <Download className="w-4 h-4" aria-hidden="true" />
                 <span>Download File</span>
               </button>
+
+              {supportsFileSystemAccess && (
+                <button
+                  onClick={handleStreamSaveToDisk}
+                  disabled={isStreamingSave}
+                  className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-emerald-300 border border-emerald-500/40 transition-colors text-xs font-semibold"
+                  title="Stream directly to disk via File System Access API (FileSystemWritableFileStream)"
+                >
+                  <HardDrive className="w-3.5 h-3.5 text-emerald-400" aria-hidden="true" />
+                  <span>{isStreamingSave ? 'Streaming to Disk...' : 'Save via Disk Stream'}</span>
+                </button>
+              )}
 
               <button
                 onClick={handleExecutePurge}

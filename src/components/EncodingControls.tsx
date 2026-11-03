@@ -701,6 +701,84 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
             </div>
           )}
 
+          {/* Smart Remux & Subtitle Container Options */}
+          {config.targetCategory === 'video' && config.container !== 'gif' && (
+            <div className="bg-zinc-950/70 border border-zinc-800/80 rounded-xl p-3.5 space-y-2.5 font-mono text-xs">
+              <div className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider flex items-center justify-between">
+                <span>Smart Remux & Container Flags</span>
+                <span className="text-emerald-400 text-[10px]">
+                  {config.container === 'mp4' || config.container === 'mov'
+                    ? 'MP4 / QuickTime Spec'
+                    : `${config.container.toUpperCase()} Spec`}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-[11px]">
+                {/* Faststart moov atom */}
+                {(config.container === 'mp4' || config.container === 'mov') && (
+                  <label className="flex items-start gap-2 p-2.5 rounded-lg bg-zinc-900/60 border border-zinc-800 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={config.fastStart !== false}
+                      onChange={(e) => updateConfig({ fastStart: e.target.checked })}
+                      className="rounded bg-zinc-800 border-zinc-700 text-emerald-500 focus:ring-0 w-3.5 h-3.5 mt-0.5 cursor-pointer"
+                    />
+                    <div>
+                      <div className="text-zinc-200 font-semibold">-movflags +faststart</div>
+                      <div className="text-[10px] text-zinc-500 mt-0.5">
+                        Place MP4 moov atom at front for instant web playback
+                      </div>
+                    </div>
+                  </label>
+                )}
+
+                {/* Conditional Audio Transcoding */}
+                <label className="flex items-start gap-2 p-2.5 rounded-lg bg-zinc-900/60 border border-zinc-800 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={config.conditionalAudioTranscode !== false}
+                    onChange={(e) => updateConfig({ conditionalAudioTranscode: e.target.checked })}
+                    className="rounded bg-zinc-800 border-zinc-700 text-emerald-500 focus:ring-0 w-3.5 h-3.5 mt-0.5 cursor-pointer"
+                  />
+                  <div>
+                    <div className="text-zinc-200 font-semibold">Conditional Audio → AAC</div>
+                    <div className="text-[10px] text-zinc-500 mt-0.5">
+                      Transcode DTS/TrueHD/FLAC to AAC while keeping video copy
+                    </div>
+                  </div>
+                </label>
+
+                {/* Subtitle Mode */}
+                <div className="p-2.5 rounded-lg bg-zinc-900/60 border border-zinc-800 flex flex-col justify-between">
+                  <div className="text-zinc-200 font-semibold mb-1">Subtitle Stream Mode</div>
+                  <select
+                    value={config.subtitleMode || 'convert'}
+                    onChange={(e) => updateConfig({ subtitleMode: e.target.value as any })}
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-[11px] text-zinc-200 focus:outline-none focus:border-emerald-500"
+                  >
+                    <option value="convert">
+                      {config.container === 'mp4' || config.container === 'mov'
+                        ? 'Convert Text to mov_text (Drop Bitmap)'
+                        : config.container === 'webm'
+                        ? 'Convert Text to WebVTT'
+                        : 'Convert to SRT'}
+                    </option>
+                    <option value="copy">Direct Stream Copy (-c:s copy)</option>
+                    <option value="drop">Strip All Subtitles (-sn)</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Smart Remux Note */}
+          {compatibility.autoRemuxNote && (
+            <div className="p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-start gap-2.5 text-xs text-emerald-200 font-mono">
+              <Check className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+              <div>{compatibility.autoRemuxNote}</div>
+            </div>
+          )}
+
           {/* Compatibility Alert (if any) */}
           {!compatibility.isCompatible && (
             <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-start gap-2.5 text-xs text-amber-200 font-mono">

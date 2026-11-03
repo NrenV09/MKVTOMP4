@@ -27,7 +27,9 @@ import {
   EncodingConfig, 
   ProgressTelemetry, 
   LogMessage, 
-  ConversionResult 
+  ConversionResult,
+  SubtitleTrackInfo,
+  FFmpegDiagnostic
 } from './types';
 import { 
   buildFFmpegArgs, 
@@ -35,7 +37,8 @@ import {
   getMimeType, 
   formatDuration,
   checkCompatibility,
-  detectDeviceCapabilities
+  detectDeviceCapabilities,
+  diagnoseFFmpegFailure
 } from './utils/ffmpegBuilder';
 import { parseFFmpegProbeLogs, probeMediaElement, AUDIO_EXTENSIONS, getFileExtension } from './utils/probe';
 import { 
@@ -81,13 +84,16 @@ const DEFAULT_CONFIG: EncodingConfig = {
   audioBitrate: '192k',
   audioChannels: 'source',
   audioSampleRate: 'source',
+  subtitleMode: 'convert',
+  preserveMetadataTags: true,
+  conditionalAudioTranscode: true,
   fastStart: true,
   hardwareAcceleration: true,
   hardwareEngine: 'auto',
 };
 
 export default function App() {
-  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('compressor');
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('media');
   const [engineReady, setEngineReady] = useState(false);
   const [engineLoading, setEngineLoading] = useState(false);
   const [engineError, setEngineError] = useState<string | null>(null);
@@ -96,6 +102,7 @@ export default function App() {
   const [rawFile, setRawFile] = useState<File | null>(null);
   const [sourceMeta, setSourceMeta] = useState<SourceMetadata | null>(null);
   const [isProbing, setIsProbing] = useState(false);
+  const [extractingSubtitleIndex, setExtractingSubtitleIndex] = useState<number | null>(null);
 
   const [hardwareCaps, setHardwareCaps] = useState<HardwareCapabilities | null>(null);
   const hwAbortController = useRef<AbortController | null>(null);
@@ -103,6 +110,7 @@ export default function App() {
   const [config, setConfig] = useState<EncodingConfig>(DEFAULT_CONFIG);
   const [isConverting, setIsConverting] = useState(false);
   const [conversionError, setConversionError] = useState<string | null>(null);
+  const [conversionDiagnostic, setConversionDiagnostic] = useState<FFmpegDiagnostic | null>(null);
 
   const [telemetry, setTelemetry] = useState<ProgressTelemetry>({
     percent: 0,
@@ -434,13 +442,14 @@ export default function App() {
     };
   }, [revokeActiveUrl]);
 
-  // Inspect source media file
+  // Inspect source media file immediately upon selection
   const handleFileSelected = async (file: File) => {
     revokeActiveUrl();
     setIsPurged(false);
     setRawFile(file);
     setResult(null);
     setConversionError(null);
+    setConversionDiagnostic(null);
     setIsProbing(true);
 
     const ext = getFileExtension(file.name);
@@ -470,15 +479,15 @@ export default function App() {
 
     setSourceMeta(initialMeta);
 
-    // Adapt default configuration:
-    // On Apple Silicon M3, default to Stream Copy (Remux) for video containers
-    // which operates at 50x-150x speed with 0% CPU loss!
     if (isAudioOnly) {
       setConfig((prev) => ({
         ...prev,
         targetCategory: 'audio',
         container: 'mp3',
         audioCodec: 'libmp3lame',
+        selectedVideoTrackIndices: undefined,
+        selectedAudioTrackIndices: [0],
+        selectedSubtitleTrackIndices: [],
       }));
     } else {
       setConfig((prev) => ({
@@ -486,23 +495,31 @@ export default function App() {
         targetCategory: 'video',
         container: 'mp4',
         videoCodec: 'copy',
-        audioCodec:
-          htmlMeta.audioCodec && !['aac', 'alac', 'mp3'].includes(htmlMeta.audioCodec.toLowerCase())
-            ? 'aac'
-            : 'copy',
+        audioCodec: 'copy',
+        conditionalAudioTranscode: true,
+        subtitleMode: 'convert',
+        preserveMetadataTags: true,
         speedPreset: 'ultrafast',
-        fastStart: file.size <= 200 * 1024 * 1024,
+        fastStart: true,
+        selectedVideoTrackIndices: undefined,
+        selectedAudioTrackIndices: undefined,
+        selectedSubtitleTrackIndices: undefined,
       }));
     }
 
-    // 2. Comprehensive stream inspection via FFmpeg WORKERFS (0 MB RAM zero-copy mount)
+    // 2. Ensure FFmpeg worker engine is loaded so we can run full container stream inspection (-i) before conversion
+    if (!ffmpegRef.current || !ffmpegRef.current.loaded) {
+      await initEngine();
+    }
+
+    // 3. Comprehensive stream inspection via FFmpeg WORKERFS (0 MB RAM zero-copy mount)
     if (ffmpegRef.current && ffmpegRef.current.loaded) {
       const probeMountDir = `/probe_mnt_${Date.now()}`;
       const tempFileName = `probe${ext || '.media'}`;
       const probeVirtualPath = `${probeMountDir}/${tempFileName}`;
       try {
         probeLogsBuffer.current = [];
-        addLog('system', `Probing stream headers for ${file.name} via zero-copy WORKERFS...`);
+        addLog('system', `Probing all container tracks for ${file.name} via zero-copy WORKERFS...`);
 
         await ffmpegRef.current.createDir(probeMountDir);
         const mounted = await ffmpegRef.current.mount(
@@ -533,11 +550,24 @@ export default function App() {
             audioSampleRate: parsed.audioSampleRate || prev.audioSampleRate,
             audioChannels: parsed.audioChannels || prev.audioChannels,
             bitrate: parsed.bitrate || prev.bitrate,
+            pixelFormat: parsed.pixelFormat || prev.pixelFormat,
+            is10Bit: parsed.is10Bit ?? prev.is10Bit,
+            is4K: parsed.is4K ?? prev.is4K,
+            isHighBitrate: parsed.isHighBitrate ?? prev.isHighBitrate,
             parsedStreams: parsed.parsedStreams || prev.parsedStreams,
+            videoTracks: parsed.videoTracks || prev.videoTracks,
+            audioTracks: parsed.audioTracks || prev.audioTracks,
+            subtitleTracks: parsed.subtitleTracks || prev.subtitleTracks,
+            chapters: parsed.chapters || prev.chapters,
+            attachments: parsed.attachments || prev.attachments,
             hasVideo: hasV,
             hasAudio: hasA,
           };
         });
+
+        const vTracks = parsed.videoTracks || [];
+        const aTracks = parsed.audioTracks || [];
+        const sTracks = parsed.subtitleTracks || [];
 
         // If deep probe determined it has no video and only audio, adjust to audio
         if (!parsed.hasVideo && parsed.hasAudio) {
@@ -546,38 +576,67 @@ export default function App() {
             targetCategory: 'audio',
             container: prev.targetCategory === 'audio' ? prev.container : 'mp3',
             audioCodec: prev.targetCategory === 'audio' ? prev.audioCodec : 'libmp3lame',
+            selectedAudioTrackIndices: aTracks.length > 0 ? [aTracks[0].typeIndex] : [0],
           }));
           addLog('system', 'Detected audio-only stream layout. Configured target for audio export.');
         } else if (parsed.hasVideo) {
           const srcVid = (parsed.videoCodec || '').toLowerCase();
-          const isRemuxSafe = ['h264', 'avc1', 'hevc', 'h265', 'mpeg4', 'av1'].some((c) => srcVid.includes(c));
+          const isRemuxSafe = ['h264', 'avc1', 'hevc', 'h265', 'hvc1', 'hev1', 'mpeg4', 'av1', 'av01'].some((c) =>
+            srcVid.includes(c)
+          );
+
+          // Pre-select first video track, all audio tracks, and all text subtitle tracks
+          const defaultVideoIndices = vTracks.length > 0 ? [vTracks[0].typeIndex] : [0];
+          const defaultAudioIndices = aTracks.map((a) => a.typeIndex);
+          const defaultSubIndices = sTracks
+            .filter((s) => s.formatType === 'text')
+            .map((s) => s.typeIndex);
 
           if (isRemuxSafe) {
             setConfig((prev) => ({
               ...prev,
               videoCodec: 'copy',
-              audioCodec: (parsed.audioCodec || '').toLowerCase().includes('aac') ? 'copy' : 'aac',
+              audioCodec: 'copy',
+              conditionalAudioTranscode: true,
+              subtitleMode: 'convert',
+              preserveMetadataTags: true,
+              fastStart: true,
+              selectedVideoTrackIndices: defaultVideoIndices,
+              selectedAudioTrackIndices: defaultAudioIndices,
+              selectedSubtitleTrackIndices: defaultSubIndices,
               hardwareAcceleration: true,
               hardwareEngine: 'stream-copy',
             }));
-            addLog('system', `Native ${parsed.videoCodec} stream confirmed. Direct hardware stream copy enabled.`);
+            addLog(
+              'system',
+              `Probed ${vTracks.length} video, ${aTracks.length} audio, ${sTracks.length} subtitle tracks. Smart Stream-Copy Remux ready.`
+            );
           } else {
-            // Source requires transcoding (e.g. WMV, VP8, VP9)
+            // Source requires transcoding (e.g. WMV, VP8, VP9 in MP4)
             setConfig((prev) => ({
               ...prev,
               videoCodec: 'libx264',
               audioCodec: 'aac',
               speedPreset: 'ultrafast',
+              subtitleMode: 'convert',
+              preserveMetadataTags: true,
+              fastStart: true,
+              selectedVideoTrackIndices: defaultVideoIndices,
+              selectedAudioTrackIndices: defaultAudioIndices,
+              selectedSubtitleTrackIndices: defaultSubIndices,
               hardwareAcceleration: true,
               hardwareEngine: 'webgpu',
             }));
-            addLog('system', `Source codec ${parsed.videoCodec || 'unknown'} requires re-encoding. WebGPU & WebCodecs hardware acceleration configured.`);
+            addLog(
+              'system',
+              `Source codec ${parsed.videoCodec || 'unknown'} requires re-encoding for MP4. Configured H.264 + AAC preset.`
+            );
           }
         }
 
         addLog('system', 'Stream layout inspection complete.');
       } catch {
-        // Handled silently since probe logs contain what we need
+        // Handled silently since FFmpeg -i exits with code 1 when no output file is specified
       } finally {
         try {
           await ffmpegRef.current.unmount(probeMountDir);
@@ -591,6 +650,88 @@ export default function App() {
     setIsProbing(false);
   };
 
+  // Extract a specific text subtitle track as a standalone .SRT file via zero-copy WORKERFS
+  const handleExtractSubtitleSrt = async (track: SubtitleTrackInfo) => {
+    if (!rawFile || !sourceMeta) return;
+    setExtractingSubtitleIndex(track.typeIndex);
+
+    if (!ffmpegRef.current || !ffmpegRef.current.loaded) {
+      const ok = await initEngine();
+      if (!ok || !ffmpegRef.current) {
+        setExtractingSubtitleIndex(null);
+        return;
+      }
+    }
+
+    const ffmpeg = ffmpegRef.current;
+    const extIn = sourceMeta.extension || '.mkv';
+    const subMountDir = `/sub_mnt_${Date.now()}`;
+    const inFileName = `sub_src_${Date.now()}${extIn}`;
+    const virtualIn = `${subMountDir}/${inFileName}`;
+    const baseName = sourceMeta.name.replace(/\.[^/.]+$/, '');
+    const langSuffix = track.language ? `.${track.language}` : `.track${track.typeIndex}`;
+    const outSrtName = `${baseName}${langSuffix}.srt`;
+    const virtualOutSrt = `extracted_${Date.now()}.srt`;
+
+    try {
+      addLog('system', `Extracting subtitle track #0:s:${track.typeIndex} (${track.codec.toUpperCase()}) to ${outSrtName}...`);
+      await ffmpeg.createDir(subMountDir);
+      await ffmpeg.mount(
+        'WORKERFS' as any,
+        { blobs: [{ name: inFileName, data: rawFile }] },
+        subMountDir
+      );
+
+      const code = await ffmpeg.exec([
+        '-threads',
+        '0',
+        '-i',
+        virtualIn,
+        '-map',
+        `0:s:${track.typeIndex}`,
+        '-c:s',
+        'srt',
+        virtualOutSrt,
+      ]);
+
+      if (code === 0) {
+        const res = await ffmpeg.readFile(virtualOutSrt, 'blob:text/plain;charset=utf-8' as any);
+        const srtBlob =
+          res instanceof Blob
+            ? res
+            : new Blob([res as Uint8Array], { type: 'text/plain;charset=utf-8' });
+        const srtUrl = URL.createObjectURL(srtBlob);
+        const a = document.createElement('a');
+        a.href = srtUrl;
+        a.download = outSrtName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => {
+          try {
+            URL.revokeObjectURL(srtUrl);
+          } catch {}
+        }, 10000);
+        addLog('system', `Exported standalone subtitle file: ${outSrtName} (${(srtBlob.size / 1024).toFixed(1)} KB).`);
+      } else {
+        addLog('error', `Could not convert subtitle track #0:s:${track.typeIndex} to .SRT (exit code ${code}).`);
+      }
+    } catch (err: any) {
+      addLog('error', `Subtitle extraction error: ${err?.message || 'Failed'}`);
+    } finally {
+      try {
+        await ffmpeg.deleteFile(virtualOutSrt);
+      } catch {}
+      try {
+        await ffmpeg.unmount(subMountDir);
+      } catch {}
+      try {
+        await ffmpeg.deleteDir(subMountDir);
+      } catch {}
+      setExtractingSubtitleIndex(null);
+    }
+  };
+
   const handleClearFile = () => {
     revokeActiveUrl();
     setIsPurged(false);
@@ -598,6 +739,7 @@ export default function App() {
     setSourceMeta(null);
     setResult(null);
     setConversionError(null);
+    setConversionDiagnostic(null);
     setTelemetry({
       percent: 0,
       currentTime: 0,
@@ -624,6 +766,7 @@ export default function App() {
     setIsPurged(false);
     setIsConverting(true);
     setConversionError(null);
+    setConversionDiagnostic(null);
     setResult(null);
 
     // On-demand engine initialization if not yet mounted
@@ -1023,9 +1166,19 @@ export default function App() {
         await ffmpegRef.current?.unmount(inputMountDir);
         await ffmpegRef.current?.deleteDir(inputMountDir);
       } catch {}
+      try {
+        await ffmpegRef.current?.deleteFile(virtualOut);
+      } catch {}
       console.error('Conversion failed:', err);
       const errorMsg = err?.message || 'Media conversion failed.';
-      setConversionError(errorMsg);
+      const diag = diagnoseFFmpegFailure(
+        errorMsg,
+        probeLogsBuffer.current,
+        config,
+        sourceMeta
+      );
+      setConversionDiagnostic(diag);
+      setConversionError(`${diag.title}: ${diag.explanation}`);
       addLog('error', `Execution failed: ${errorMsg}`);
     } finally {
       // Release Screen Wake Lock
@@ -1120,15 +1273,22 @@ export default function App() {
           </div>
         )}
 
-        {/* Global Conversion Error */}
+        {/* Global Conversion Error & Actionable Diagnostics */}
         {conversionError && (
           <div className="p-4 rounded-xl bg-red-950/40 border border-red-800/80 text-red-200 text-xs font-mono flex items-start gap-3">
             <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
             <div className="flex-1">
-              <div className="font-semibold text-red-400 text-sm">Conversion Pipeline Error</div>
-              <p className="mt-1 text-red-300/90">{conversionError}</p>
-              <div className="mt-2 text-[11px] text-zinc-400">
-                Tip: If you used "Stream Copy", the source video/audio codecs may not fit into the chosen container. Select "H.264 / AAC" under encoding controls to re-encode.
+              <div className="font-semibold text-red-400 text-sm">
+                {conversionDiagnostic ? conversionDiagnostic.title : 'Conversion Pipeline Error'}
+              </div>
+              <p className="mt-1 text-red-300/90">
+                {conversionDiagnostic ? conversionDiagnostic.explanation : conversionError}
+              </p>
+              <div className="mt-2 text-[11px] text-amber-300/90 bg-red-950/60 border border-red-800/50 rounded px-2.5 py-1.5">
+                <strong>Recommended Action:</strong>{' '}
+                {conversionDiagnostic
+                  ? conversionDiagnostic.suggestion
+                  : 'If you used Stream Copy, select H.264 / AAC under encoding controls or uncheck incompatible subtitle tracks.'}
               </div>
             </div>
           </div>
@@ -1170,6 +1330,10 @@ export default function App() {
                     isProbing={isProbing}
                     onClear={handleClearFile}
                     disabled={isConverting}
+                    config={config}
+                    onChangeConfig={setConfig}
+                    onExtractSubtitle={handleExtractSubtitleSrt}
+                    extractingSubtitleIndex={extractingSubtitleIndex}
                   />
 
                   {result ? (
@@ -1215,7 +1379,7 @@ export default function App() {
                             </div>
                             <div className="text-xs text-zinc-400 font-mono mt-0.5">
                               {config.videoCodec === 'copy' && config.audioCodec === 'copy'
-                                ? '⚡ Direct stream copy'
+                                ? 'Direct stream copy'
                                 : `Transcode (${config.speedPreset})`}
                             </div>
                           </div>
@@ -1279,6 +1443,10 @@ export default function App() {
                   isProbing={isProbing}
                   onClear={handleClearFile}
                   disabled={isConverting}
+                  config={config}
+                  onChangeConfig={setConfig}
+                  onExtractSubtitle={handleExtractSubtitleSrt}
+                  extractingSubtitleIndex={extractingSubtitleIndex}
                 />
 
                 {/* 2. RESULT PANEL (If completed) */}
