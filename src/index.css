@@ -3,9 +3,90 @@
 @layer base {
   :root {
     font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+    --cyber-bg: #05060b;
+    --cyber-surface: #0a0d16;
+    --cyber-surface-elevated: #0f1422;
+    --cyber-cyan: #00f0ff;
+    --cyber-emerald: #10b981;
+    --cyber-magenta: #ff2a85;
+    --cyber-amber: #f59e0b;
+  }
+
+  body {
+    background-color: #05060b;
+    background-image:
+      radial-gradient(circle at 15% 0%, rgba(0, 240, 255, 0.08) 0%, transparent 45%),
+      radial-gradient(circle at 85% 10%, rgba(16, 185, 129, 0.08) 0%, transparent 45%),
+      linear-gradient(rgba(0, 240, 255, 0.028) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0, 240, 255, 0.028) 1px, transparent 1px);
+    background-size: 100% 100%, 100% 100%, 32px 32px, 32px 32px;
+    background-attachment: fixed;
+    color: #f4f4f5;
   }
 
   code, pre, kbd, samp {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
   }
 }
+
+.cyber-panel {
+  position: relative;
+  background: linear-gradient(180deg, rgba(14, 19, 32, 0.92) 0%, rgba(9, 12, 20, 0.96) 100%);
+  border: 1px solid rgba(0, 240, 255, 0.2);
+  box-shadow:
+    0 10px 30px -10px rgba(0, 0, 0, 0.7),
+    0 0 20px -5px rgba(0, 240, 255, 0.06),
+    inset 0 1px 0 0 rgba(0, 240, 255, 0.12);
+}
+
+.cyber-panel-emerald {
+  position: relative;
+  background: linear-gradient(180deg, rgba(10, 24, 24, 0.92) 0%, rgba(8, 14, 18, 0.96) 100%);
+  border: 1px solid rgba(16, 185, 129, 0.32);
+  box-shadow:
+    0 10px 30px -10px rgba(0, 0, 0, 0.7),
+    0 0 24px -6px rgba(16, 185, 129, 0.12),
+    inset 0 1px 0 0 rgba(16, 185, 129, 0.2);
+}
+
+.cyber-btn-primary {
+  background: linear-gradient(135deg, #00f0ff 0%, #10b981 100%);
+  color: #030712;
+  font-weight: 700;
+  box-shadow: 0 0 20px rgba(0, 240, 255, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  transition: all 160ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.cyber-btn-primary:hover:not(:disabled) {
+  filter: brightness(1.1);
+  box-shadow: 0 0 28px rgba(0, 240, 255, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  transform: translateY(-1px);
+}
+
+.cyber-btn-primary:active:not(:disabled) {
+  transform: translateY(0px);
+}
+
+.cyber-glow-text {
+  text-shadow: 0 0 12px rgba(0, 240, 255, 0.35);
+}
+
+/* Custom sleek cyber scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #060810;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #00f0ff;
+}
+

@@ -55,6 +55,7 @@ import {
   WasmCacheStats,
 } from './utils/wasmCache';
 import { preloadAllEnginesToIDB } from './utils/engineIndexedDBCache';
+import { generateSampleMediaFile } from './utils/sampleMediaGenerator';
 
 import { Header, WorkspaceMode } from './components/Header';
 import { MediaDropzone } from './components/MediaDropzone';
@@ -103,6 +104,7 @@ export default function App() {
   const [sourceMeta, setSourceMeta] = useState<SourceMetadata | null>(null);
   const [isProbing, setIsProbing] = useState(false);
   const [extractingSubtitleIndex, setExtractingSubtitleIndex] = useState<number | null>(null);
+  const [generatingSample, setGeneratingSample] = useState<string | null>(null);
 
   const [hardwareCaps, setHardwareCaps] = useState<HardwareCapabilities | null>(null);
   const hwAbortController = useRef<AbortController | null>(null);
@@ -732,6 +734,28 @@ export default function App() {
     }
   };
 
+  // Synthesize a real in-browser sample media file (MKV+SRT, MP4, or WAV) for instant offline testing
+  const handleGenerateSample = async (kind: 'mkv-multitrack' | 'mp4-stream' | 'wav-audio') => {
+    setGeneratingSample(kind);
+    try {
+      if (kind !== 'wav-audio' && (!ffmpegRef.current || !ffmpegRef.current.loaded)) {
+        addLog('system', 'Mounting local FFmpeg WebAssembly engine to synthesize test stream...');
+        const ok = await initEngine();
+        if (!ok || !ffmpegRef.current) {
+          throw new Error('Could not initialize local WebAssembly engine.');
+        }
+      }
+      addLog('system', `Synthesizing offline sample stream (${kind})...`);
+      const sampleFile = await generateSampleMediaFile(ffmpegRef.current!, kind);
+      addLog('system', `Generated ${sampleFile.name} (${(sampleFile.size / 1024).toFixed(1)} KB). Loading into inspector...`);
+      await handleFileSelected(sampleFile);
+    } catch (err: any) {
+      addLog('error', `Sample synthesis failed: ${err?.message || 'Unknown error'}`);
+    } finally {
+      setGeneratingSample(null);
+    }
+  };
+
   const handleClearFile = () => {
     revokeActiveUrl();
     setIsPurged(false);
@@ -1236,7 +1260,7 @@ export default function App() {
   );
 
   return (
-    <div className="min-h-screen bg-[#09090b] text-zinc-100 flex flex-col font-sans selection:bg-emerald-500/20 selection:text-emerald-300">
+    <div className="min-h-screen text-zinc-100 flex flex-col font-sans selection:bg-cyan-500/20 selection:text-cyan-300">
       {/* Workstation Header */}
       <Header
         engineReady={engineReady}
@@ -1252,6 +1276,7 @@ export default function App() {
         onOpenCompliance={handleOpenCompliance}
         activeWorkspace={workspaceMode}
         onSelectWorkspace={setWorkspaceMode}
+        onInitEngine={initEngine}
       />
 
       {/* Main Workstation Canvas */}
@@ -1265,7 +1290,7 @@ export default function App() {
               <p className="mt-1 text-red-300/90">{engineError}</p>
               <button
                 onClick={initEngine}
-                className="mt-2.5 px-3 py-1 rounded bg-red-900 hover:bg-red-800 text-red-100 border border-red-700 transition-colors"
+                className="mt-2.5 px-3 py-1 rounded bg-red-900 hover:bg-red-800 text-red-100 border border-red-700 transition-colors cursor-pointer"
               >
                 Retry Initialization
               </button>
@@ -1303,14 +1328,14 @@ export default function App() {
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
             {/* Left Column: Media Converter */}
             <div className="space-y-4">
-              <div className="p-3 rounded-xl bg-[#121215] border border-zinc-800 flex items-center justify-between">
-                <span className="text-xs font-semibold text-zinc-200 flex items-center gap-2">
-                  <Film className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Media Converter (MKV/MP4)</span>
+              <div className="p-3 rounded-xl cyber-panel flex items-center justify-between">
+                <span className="text-xs font-mono font-bold uppercase tracking-wider text-cyan-300 flex items-center gap-2">
+                  <Film className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>MEDIA REMUX & TRANSCODE DECK</span>
                 </span>
                 <button
                   onClick={() => setWorkspaceMode('media')}
-                  className="text-[11px] text-zinc-400 hover:text-emerald-400 transition-colors"
+                  className="text-[11px] font-mono text-zinc-400 hover:text-cyan-300 transition-colors cursor-pointer"
                 >
                   Focus View →
                 </button>
@@ -1321,6 +1346,8 @@ export default function App() {
                   <MediaDropzone
                     onFileSelected={handleFileSelected}
                     disabled={false}
+                    onGenerateSample={handleGenerateSample}
+                    generatingSample={generatingSample}
                   />
                 </div>
               ) : (
@@ -1334,6 +1361,7 @@ export default function App() {
                     onChangeConfig={setConfig}
                     onExtractSubtitle={handleExtractSubtitleSrt}
                     extractingSubtitleIndex={extractingSubtitleIndex}
+                    onReprobe={() => rawFile && handleFileSelected(rawFile)}
                   />
 
                   {result ? (
@@ -1365,21 +1393,21 @@ export default function App() {
                         hardwareCaps={hardwareCaps}
                       />
 
-                      <div className="bg-[#121215] border border-zinc-800 rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xl">
+                      <div className="cyber-panel rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xl">
                         <div className="flex items-center gap-3 w-full sm:w-auto">
-                          <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+                          <div className="w-10 h-10 rounded-xl bg-cyan-500/10 border border-cyan-500/40 flex items-center justify-center text-cyan-400 shrink-0">
                             <Zap className="w-5 h-5 fill-current" />
                           </div>
                           <div>
-                            <div className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
-                              <span>Target format</span>
-                              <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono text-xs uppercase font-bold">
+                            <div className="text-sm font-mono font-bold text-zinc-100 flex items-center gap-2">
+                              <span>TARGET CONTAINER</span>
+                              <span className="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 font-mono text-xs uppercase font-bold">
                                 .{config.container}
                               </span>
                             </div>
                             <div className="text-xs text-zinc-400 font-mono mt-0.5">
                               {config.videoCodec === 'copy' && config.audioCodec === 'copy'
-                                ? 'Direct stream copy'
+                                ? 'Direct stream copy (OPFS / 16 MB Paged Storage)'
                                 : `Transcode (${config.speedPreset})`}
                             </div>
                           </div>
@@ -1388,20 +1416,24 @@ export default function App() {
                         <button
                           onClick={handleStartConversion}
                           disabled={!rawFile || isConverting || engineLoading}
-                          className="w-full sm:w-auto px-6 py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-zinc-950 font-bold text-xs transition-all shadow-md shadow-emerald-500/25 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                          className="cyber-btn-primary w-full sm:w-auto px-6 py-3 rounded-xl text-xs transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
                         >
                           {engineLoading ? (
                             <>
                               <Loader2 className="w-4 h-4 animate-spin text-zinc-950" />
-                              <span>Loading Engine...</span>
+                              <span>Mounting Engine...</span>
                             </>
                           ) : (
-                            <span>Convert to .{config.container.toUpperCase()}</span>
+                            <span>Execute .{config.container.toUpperCase()} Pipeline</span>
                           )}
                         </button>
                       </div>
 
-                      <CommandPreview commandArgs={currentCommandArgs} />
+                      <CommandPreview
+                        commandArgs={currentCommandArgs}
+                        onExecute={handleStartConversion}
+                        disabled={!rawFile || isConverting || engineLoading}
+                      />
                     </div>
                   )}
                 </div>
@@ -1410,14 +1442,14 @@ export default function App() {
 
             {/* Right Column: File Compressor & Decompressor */}
             <div className="space-y-4">
-              <div className="p-3 rounded-xl bg-[#121215] border border-zinc-800 flex items-center justify-between">
-                <span className="text-xs font-semibold text-zinc-200 flex items-center gap-2">
+              <div className="p-3 rounded-xl cyber-panel flex items-center justify-between">
+                <span className="text-xs font-mono font-bold uppercase tracking-wider text-emerald-300 flex items-center gap-2">
                   <Archive className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>File Compressor & Decompressor (ZIP / TAR / GZ)</span>
+                  <span>ARCHIVE LAB (ZIP / TAR / GZ)</span>
                 </span>
                 <button
                   onClick={() => setWorkspaceMode('compressor')}
-                  className="text-[11px] text-zinc-400 hover:text-emerald-400 transition-colors"
+                  className="text-[11px] font-mono text-zinc-400 hover:text-emerald-400 transition-colors cursor-pointer"
                 >
                   Focus View →
                 </button>
@@ -1434,6 +1466,8 @@ export default function App() {
                 <MediaDropzone
                   onFileSelected={handleFileSelected}
                   disabled={false}
+                  onGenerateSample={handleGenerateSample}
+                  generatingSample={generatingSample}
                 />
               </div>
             ) : (
@@ -1447,6 +1481,7 @@ export default function App() {
                   onChangeConfig={setConfig}
                   onExtractSubtitle={handleExtractSubtitleSrt}
                   extractingSubtitleIndex={extractingSubtitleIndex}
+                  onReprobe={() => rawFile && handleFileSelected(rawFile)}
                 />
 
                 {/* 2. RESULT PANEL (If completed) */}
@@ -1482,23 +1517,23 @@ export default function App() {
                     />
 
                     {/* Primary Action Button & Summary */}
-                    <div className="bg-[#121215] border border-zinc-800 rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xl">
+                    <div className="cyber-panel rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xl">
                       <div className="flex items-center gap-3 w-full sm:w-auto">
-                        <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+                        <div className="w-10 h-10 rounded-xl bg-cyan-500/10 border border-cyan-500/40 flex items-center justify-center text-cyan-400 shrink-0 shadow-[0_0_15px_rgba(0,240,255,0.18)]">
                           <Zap className="w-5 h-5 fill-current" />
                         </div>
                         <div>
-                          <div className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
-                            <span>Target format</span>
-                            <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono text-xs uppercase font-bold">
+                          <div className="text-sm font-mono font-bold text-zinc-100 flex items-center gap-2">
+                            <span>TARGET FORMAT //</span>
+                            <span className="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 font-mono text-xs uppercase font-bold">
                               .{config.container}
                             </span>
                           </div>
                           <div className="text-xs text-zinc-400 font-mono mt-0.5">
                             {config.videoCodec === 'copy' && config.audioCodec === 'copy'
-                              ? '⚡ Direct stream copy (lossless passthrough • near-instant remuxing)'
+                              ? '⚡ Direct stream copy (lossless passthrough • OPFS / 16 MB Paged Storage)'
                               : config.videoCodec === 'copy'
-                              ? '⚡ Video passthrough (stream copy) • Audio transcode'
+                              ? '⚡ Video passthrough (stream copy) • Conditional AAC Audio transcode'
                               : config.hardwareAcceleration !== false && (hardwareCaps?.webcodecs.hwH264 || hardwareCaps?.webcodecs.available)
                               ? '⚡ Hardware-accelerated encoding via WebCodecs & GPU'
                               : `CPU multi-core transcode (${config.speedPreset})`}
@@ -1510,20 +1545,24 @@ export default function App() {
                         onClick={handleStartConversion}
                         disabled={!rawFile || isConverting || engineLoading}
                         aria-label={`Convert media file to ${config.container.toUpperCase()} container`}
-                        className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-zinc-950 font-sans font-bold text-sm tracking-wide transition-all shadow-lg shadow-emerald-500/25 flex items-center justify-center gap-2.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed hover:scale-[1.02] active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+                        className="cyber-btn-primary w-full sm:w-auto px-8 py-3.5 rounded-xl text-sm tracking-wide transition-all flex items-center justify-center gap-2.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed hover:scale-[1.02] active:scale-[0.98] focus:outline-none"
                       >
                         {engineLoading ? (
                           <>
                             <Loader2 className="w-4 h-4 animate-spin text-zinc-950" />
-                            <span>Loading Engine...</span>
+                            <span>Mounting Engine...</span>
                           </>
                         ) : (
-                          <span>Convert to .{config.container.toUpperCase()}</span>
+                          <span>Execute .{config.container.toUpperCase()} Pipeline</span>
                         )}
                       </button>
                     </div>
 
-                    <CommandPreview commandArgs={currentCommandArgs} />
+                    <CommandPreview
+                      commandArgs={currentCommandArgs}
+                      onExecute={handleStartConversion}
+                      disabled={!rawFile || isConverting || engineLoading}
+                    />
                   </div>
                 )}
               </div>

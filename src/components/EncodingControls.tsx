@@ -186,42 +186,51 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
   return (
     <div className={`space-y-4 ${disabled ? 'opacity-60 pointer-events-none' : ''}`}>
       {/* Mode Switcher: Simple vs Pro */}
-      <div className="flex items-center justify-between bg-[#121215] border border-zinc-800 rounded-xl px-4 py-2.5 select-none">
+      <div className="flex flex-wrap items-center justify-between gap-2 cyber-panel rounded-xl px-4 py-2.5 select-none">
         <div className="flex items-center gap-2">
-          <span className="text-xs font-mono text-zinc-400 uppercase tracking-wider hidden sm:inline">
-            CONFIGURATION MODE:
+          <span className="text-xs font-mono text-cyan-400 uppercase tracking-wider hidden sm:inline">
+            PIPELINE CONFIG //
           </span>
-          <div className="flex items-center gap-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800">
+          <div className="flex items-center gap-1 bg-zinc-950/90 p-1 rounded-lg border border-cyan-500/30">
             <button
               onClick={() => setMode('simple')}
-              className={`px-3 py-1 rounded-md text-xs font-medium flex items-center gap-1.5 transition-all ${
+              className={`px-3 py-1 rounded-md text-xs font-mono font-bold uppercase tracking-wider flex items-center gap-1.5 transition-all cursor-pointer ${
                 mode === 'simple'
-                  ? 'bg-emerald-500 text-zinc-950 font-semibold shadow-sm'
-                  : 'text-zinc-400 hover:text-zinc-200'
+                  ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-400/50 shadow-[0_0_12px_rgba(0,240,255,0.2)]'
+                  : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
               }`}
             >
               <Sparkles className="w-3.5 h-3.5" />
-              <span>Simple (Recommended)</span>
+              <span>Tactical Presets</span>
             </button>
             <button
               onClick={() => setMode('pro')}
-              className={`px-3 py-1 rounded-md text-xs font-mono flex items-center gap-1.5 transition-all ${
+              className={`px-3 py-1 rounded-md text-xs font-mono font-bold uppercase tracking-wider flex items-center gap-1.5 transition-all cursor-pointer ${
                 mode === 'pro'
-                  ? 'bg-zinc-800 text-emerald-400 font-semibold shadow-sm'
-                  : 'text-zinc-400 hover:text-zinc-200'
+                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/50 shadow-[0_0_12px_rgba(16,185,129,0.2)]'
+                  : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
               }`}
             >
               <Sliders className="w-3.5 h-3.5" />
-              <span>Pro Parameters</span>
+              <span>Pro Matrix</span>
             </button>
           </div>
         </div>
 
-        <div className="text-xs font-mono text-zinc-500">
-          Target: <strong className="text-emerald-400">.{config.container.toUpperCase()}</strong>
-          {config.videoCodec === 'copy' && config.audioCodec === 'copy' && (
-            <span className="ml-1 text-emerald-300 font-bold">(Stream Copy)</span>
-          )}
+        <div className="flex items-center gap-3">
+          <div className="text-xs font-mono text-zinc-400">
+            Target: <strong className="text-cyan-300">.{config.container.toUpperCase()}</strong>
+            {config.videoCodec === 'copy' && config.audioCodec === 'copy' && (
+              <span className="ml-1 text-emerald-400 font-bold">(Stream Copy)</span>
+            )}
+          </div>
+          <button
+            onClick={() => applyPreset('remux')}
+            className="px-2.5 py-1 rounded-md bg-zinc-900/90 hover:bg-cyan-950/50 text-zinc-300 hover:text-cyan-300 border border-zinc-800 hover:border-cyan-500/40 text-[11px] font-mono transition-colors cursor-pointer"
+            title="Reset to lossless Stream-Copy Remux defaults"
+          >
+            Reset Defaults
+          </button>
         </div>
       </div>
 
@@ -229,7 +238,7 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
       {/* SIMPLE MODE (Easy, 1-Click friendly, zero clutter) */}
       {/* ========================================================================= */}
       {mode === 'simple' && (
-        <div className="bg-[#121215] border border-zinc-800 rounded-xl p-4 sm:p-5 space-y-5">
+        <div className="cyber-panel rounded-xl p-4 sm:p-5 space-y-5">
           {/* 1. Choose Target Format */}
           <div>
             <div className="flex items-center justify-between mb-3">
@@ -816,7 +825,7 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
       {mode === 'pro' && (
         <div className="space-y-4">
           {/* 1. Category & Container Navigation Tabs */}
-          <div className="bg-[#121215] border border-zinc-800 rounded-xl p-3">
+          <div className="cyber-panel rounded-xl p-3">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-zinc-800/80">
               <div className="flex items-center gap-1.5 p-1 bg-zinc-950/80 rounded-lg border border-zinc-800 w-fit">
                 <button
@@ -996,7 +1005,7 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             {/* Left Column: Video Parameters */}
             {config.targetCategory === 'video' && config.container !== 'gif' && (
-              <div className="bg-[#121215] border border-zinc-800 rounded-xl p-4 font-mono text-xs space-y-4">
+              <div className="cyber-panel rounded-xl p-4 font-mono text-xs space-y-4">
                 <div className="flex items-center justify-between border-b border-zinc-850 pb-2.5 text-zinc-300">
                   <div className="flex items-center gap-2 font-semibold text-sm">
                     <Film className="w-4 h-4 text-emerald-400" />
@@ -1191,7 +1200,7 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
             )}
 
             {/* Right Column: Audio Parameters */}
-            <div className={`bg-[#121215] border border-zinc-800 rounded-xl p-4 font-mono text-xs space-y-4 ${
+            <div className={`cyber-panel rounded-xl p-4 font-mono text-xs space-y-4 ${
               config.targetCategory === 'audio' ? 'lg:col-span-2' : ''
             }`}>
               <div className="flex items-center justify-between border-b border-zinc-850 pb-2.5 text-zinc-300">

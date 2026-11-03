@@ -27,6 +27,7 @@ interface SourceInspectorProps {
   source: SourceMetadata;
   isProbing: boolean;
   onClear: () => void;
+  onReprobe?: () => void;
   disabled?: boolean;
   config?: EncodingConfig;
   onChangeConfig?: (newConfig: EncodingConfig) => void;
@@ -38,6 +39,7 @@ export const SourceInspector: React.FC<SourceInspectorProps> = ({
   source,
   isProbing,
   onClear,
+  onReprobe,
   disabled = false,
   config,
   onChangeConfig,
@@ -122,23 +124,23 @@ export const SourceInspector: React.FC<SourceInspectorProps> = ({
     audioTracks.some((a) => selectedAudioIndices.includes(a.typeIndex) && !a.isMp4Compatible);
 
   return (
-    <div className="bg-[#121215] border border-zinc-800 rounded-xl p-4 text-xs font-mono space-y-4">
+    <div className="cyber-panel rounded-xl p-4 text-xs font-mono space-y-4">
       {/* Header bar */}
-      <div className="flex items-center justify-between border-b border-zinc-850 pb-3">
+      <div className="flex items-center justify-between border-b border-cyan-500/20 pb-3">
         <div className="flex items-center gap-2.5 overflow-hidden">
-          <div className="w-9 h-9 rounded-lg bg-zinc-800/80 border border-zinc-750 flex items-center justify-center text-zinc-300 shrink-0">
+          <div className="w-9 h-9 rounded-lg bg-cyan-500/10 border border-cyan-400/40 flex items-center justify-center text-cyan-300 shrink-0 shadow-[0_0_12px_rgba(0,240,255,0.18)]">
             {source.hasVideo ? (
-              <FileVideo className="w-5 h-5 text-emerald-400" />
+              <FileVideo className="w-5 h-5 text-cyan-400" />
             ) : (
-              <Music className="w-5 h-5 text-blue-400" />
+              <Music className="w-5 h-5 text-purple-400" />
             )}
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-zinc-100 font-sans font-semibold text-sm truncate max-w-xs sm:max-w-md">
+              <span className="text-zinc-100 font-mono font-bold text-sm truncate max-w-xs sm:max-w-md">
                 {source.name}
               </span>
-              <span className="px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] text-emerald-400 uppercase font-bold tracking-wider">
+              <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 border border-cyan-500/30 text-[10px] text-cyan-300 uppercase font-bold tracking-wider">
                 {(source.extension || 'FILE').toUpperCase().replace('.', '')}
               </span>
 
@@ -159,18 +161,18 @@ export const SourceInspector: React.FC<SourceInspectorProps> = ({
               )}
             </div>
 
-            <div className="text-zinc-500 text-[11px] flex items-center gap-2 mt-0.5 tabular-nums flex-wrap">
+            <div className="text-zinc-400 text-[11px] flex items-center gap-2 mt-0.5 tabular-nums flex-wrap">
               <span>{formatBytes(source.size)}</span>
               <span>•</span>
               <span>{formatDuration(source.duration)}</span>
               {source.pixelFormat && (
                 <>
                   <span>•</span>
-                  <span className="text-zinc-400">{source.pixelFormat}</span>
+                  <span className="text-cyan-300/90">{source.pixelFormat}</span>
                 </>
               )}
               {isProbing && (
-                <span className="flex items-center gap-1 text-amber-400 text-[10px]">
+                <span className="flex items-center gap-1 text-cyan-300 text-[10px]">
                   <RefreshCw className="w-3 h-3 animate-spin" /> PROBING CONTAINER STREAMS...
                 </span>
               )}
@@ -179,15 +181,31 @@ export const SourceInspector: React.FC<SourceInspectorProps> = ({
         </div>
 
         {!disabled && (
-          <button
-            onClick={onClear}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-700/60 transition-colors text-xs font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 shrink-0"
-            title="Remove current file and choose another"
-            aria-label="Remove current media file and choose another"
-          >
-            <X className="w-3.5 h-3.5" aria-hidden="true" />
-            <span className="hidden sm:inline">Remove File</span>
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            {onReprobe && (
+              <button
+                type="button"
+                disabled={isProbing}
+                onClick={onReprobe}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#0a0f1c] hover:bg-cyan-950/50 text-cyan-300 border border-cyan-500/30 transition-colors text-xs font-semibold cursor-pointer disabled:opacity-50"
+                title="Re-probe container stream headers via WORKERFS"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isProbing ? 'animate-spin' : ''}`} />
+                <span className="hidden sm:inline">Re-Probe</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={onClear}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0a0f1c] hover:bg-red-950/40 text-zinc-300 hover:text-red-300 border border-cyan-500/25 hover:border-red-500/40 transition-colors text-xs font-semibold cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 shrink-0"
+              title="Remove current file and choose another"
+              aria-label="Remove current media file and choose another"
+            >
+              <X className="w-3.5 h-3.5" aria-hidden="true" />
+              <span className="hidden sm:inline">Remove File</span>
+            </button>
+          </div>
         )}
       </div>
 

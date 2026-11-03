@@ -1,5 +1,5 @@
 import React from 'react';
-import { ShieldCheck, Lock, Cookie, FileText, Scale, EyeOff, CheckCircle2, Cpu } from 'lucide-react';
+import { ShieldCheck, Lock, Database, FileText } from 'lucide-react';
 import { ComplianceTab } from './ComplianceModal';
 
 interface FooterProps {
@@ -8,35 +8,43 @@ interface FooterProps {
 
 export const Footer: React.FC<FooterProps> = ({ onOpenCompliance }) => {
   return (
-    <footer className="mt-auto border-t border-zinc-800 bg-[#09090b] text-zinc-500 text-xs py-4 px-4 select-none">
+    <footer className="mt-auto border-t border-cyan-500/20 bg-[#05070e]/90 text-zinc-400 text-xs py-3.5 px-4 select-none font-mono">
       <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3 text-[11px]">
-        <div className="flex items-center gap-4 text-zinc-400">
+        <div className="flex flex-wrap items-center gap-3 text-zinc-400">
           <button
+            type="button"
             onClick={() => onOpenCompliance('privacy')}
-            className="hover:text-zinc-200 transition-colors"
+            className="flex items-center gap-1 hover:text-cyan-300 transition-colors cursor-pointer"
           >
-            Privacy
+            <Lock className="w-3 h-3 text-cyan-400" />
+            <span>Zero-Cloud Privacy</span>
           </button>
-          <span>•</span>
+          <span className="text-zinc-700">•</span>
           <button
+            type="button"
             onClick={() => onOpenCompliance('terms')}
-            className="hover:text-zinc-200 transition-colors"
+            className="flex items-center gap-1 hover:text-cyan-300 transition-colors cursor-pointer"
           >
-            Terms
+            <FileText className="w-3 h-3 text-emerald-400" />
+            <span>License & Terms</span>
           </button>
-          <span>•</span>
+          <span className="text-zinc-700">•</span>
           <button
+            type="button"
             onClick={() => onOpenCompliance('cookies')}
-            className="hover:text-zinc-200 transition-colors"
+            className="flex items-center gap-1 hover:text-cyan-300 transition-colors cursor-pointer"
           >
-            Storage & Cache
+            <Database className="w-3 h-3 text-purple-400" />
+            <span>OPFS & Wasm Cache</span>
           </button>
         </div>
 
-        <div className="text-zinc-500 font-mono">
-          Local client-side processing
+        <div className="flex items-center gap-2 text-cyan-400/80 text-[10px] uppercase tracking-widest">
+          <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+          <span>100% Client-Side Execution • Zero Network Payload</span>
         </div>
       </div>
     </footer>
   );
 };
+

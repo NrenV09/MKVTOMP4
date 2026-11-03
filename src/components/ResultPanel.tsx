@@ -149,26 +149,26 @@ export const ResultPanel: React.FC<ResultPanelProps> = ({
   };
 
   return (
-    <div className="bg-[#121215] border border-zinc-800 rounded-xl p-5 font-mono text-xs space-y-5 shadow-2xl">
+    <div className="cyber-panel-emerald rounded-xl p-5 font-mono text-xs space-y-5 shadow-2xl">
       {/* Status Banner */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-zinc-850 pb-4">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-emerald-500/20 pb-4">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+          <div className="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-400/50 flex items-center justify-center text-emerald-400 shrink-0 shadow-[0_0_15px_rgba(16,185,129,0.2)]">
             <CheckCircle2 className="w-5 h-5" />
           </div>
           <div>
-            <div className="text-zinc-100 font-sans font-semibold text-base flex items-center gap-2">
-              <span>Conversion Completed</span>
+            <div className="text-zinc-100 font-mono font-bold uppercase tracking-wider text-base flex items-center gap-2">
+              <span>PIPELINE COMPLETE //</span>
               {downloaded && (
-                <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-mono uppercase">
-                  Saved
+                <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] font-mono uppercase">
+                  Saved to Disk
                 </span>
               )}
             </div>
-            <div className="text-zinc-500 text-[11px] flex items-center gap-2 mt-0.5 tabular-nums">
+            <div className="text-zinc-400 text-[11px] flex items-center gap-2 mt-0.5 tabular-nums">
               <span>Duration: {formatDuration(result.elapsedMs / 1000)}</span>
               <span>•</span>
-              <span className={isPurged ? 'text-zinc-400' : 'text-emerald-400'}>
+              <span className={isPurged ? 'text-zinc-400' : 'text-cyan-300'}>
                 {isPurged ? 'Cache Purged (0 B in memory)' : 'Ready for zero-copy download'}
               </span>
             </div>
@@ -182,7 +182,7 @@ export const ResultPanel: React.FC<ResultPanelProps> = ({
               <button
                 onClick={handleDownload}
                 aria-label={`Download converted file ${result.outputName}`}
-                className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-sans font-semibold text-sm transition-all shadow-lg shadow-emerald-500/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+                className="cyber-btn-primary flex items-center gap-2 px-5 py-2.5 rounded-lg text-xs transition-all cursor-pointer focus:outline-none"
               >
                 <Download className="w-4 h-4" aria-hidden="true" />
                 <span>Download File</span>
@@ -192,10 +192,10 @@ export const ResultPanel: React.FC<ResultPanelProps> = ({
                 <button
                   onClick={handleStreamSaveToDisk}
                   disabled={isStreamingSave}
-                  className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-emerald-300 border border-emerald-500/40 transition-colors text-xs font-semibold"
+                  className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 transition-colors text-xs font-semibold cursor-pointer"
                   title="Stream directly to disk via File System Access API (FileSystemWritableFileStream)"
                 >
-                  <HardDrive className="w-3.5 h-3.5 text-emerald-400" aria-hidden="true" />
+                  <HardDrive className="w-3.5 h-3.5 text-cyan-400" aria-hidden="true" />
                   <span>{isStreamingSave ? 'Streaming to Disk...' : 'Save via Disk Stream'}</span>
                 </button>
               )}
