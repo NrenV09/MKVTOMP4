@@ -69,6 +69,7 @@ import { Footer } from './components/Footer';
 import { ComplianceModal, ComplianceTab } from './components/ComplianceModal';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { FileCompressorWorkstation } from './components/FileCompressorWorkstation';
+import { PdfLockerWorkstation } from './components/PdfLockerWorkstation';
 import { Film, Archive } from 'lucide-react';
 
 const DEFAULT_CONFIG: EncodingConfig = {
@@ -1320,7 +1321,10 @@ export default function App() {
         )}
 
         {/* WORKSPACE VIEWS */}
-        {workspaceMode === 'compressor' ? (
+        {workspaceMode === 'pdf' ? (
+          /* Offline PDF Locker & Unlocker Vault */
+          <PdfLockerWorkstation onLog={addLog} />
+        ) : workspaceMode === 'compressor' ? (
           /* File Compressor & Decompressor Full View */
           <FileCompressorWorkstation />
         ) : workspaceMode === 'split' ? (

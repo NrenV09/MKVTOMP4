@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
-import { Archive, FolderArchive, Sparkles, Layers, ShieldCheck, Zap } from 'lucide-react';
+import { Archive, FolderArchive, Lock } from 'lucide-react';
 import { ArchiveCompressor } from './ArchiveCompressor';
 import { ArchiveDecompressor } from './ArchiveDecompressor';
+import { PdfLockerWorkstation } from './PdfLockerWorkstation';
 
-export type ArchiveTab = 'compress' | 'decompress';
+export type ArchiveTab = 'compress' | 'decompress' | 'pdf';
 
 interface FileCompressorWorkstationProps {
   defaultTab?: ArchiveTab;
@@ -17,7 +18,7 @@ export const FileCompressorWorkstation: React.FC<FileCompressorWorkstationProps>
   return (
     <div className="space-y-4">
       {/* Top Mode Selector Tabs */}
-      <div className="p-1.5 rounded-xl cyber-panel flex items-center justify-start gap-1.5 shadow-lg max-w-fit font-mono">
+      <div className="p-1.5 rounded-xl cyber-panel flex flex-wrap items-center justify-start gap-1.5 shadow-lg max-w-fit font-mono">
         <button
           onClick={() => setActiveTab('compress')}
           className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all cursor-pointer ${
@@ -41,10 +42,28 @@ export const FileCompressorWorkstation: React.FC<FileCompressorWorkstationProps>
           <FolderArchive className="w-4 h-4" />
           <span>Extract Archive</span>
         </button>
+
+        <button
+          onClick={() => setActiveTab('pdf')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all cursor-pointer ${
+            activeTab === 'pdf'
+              ? 'bg-amber-500/20 text-amber-300 border border-amber-400/50 shadow-[0_0_12px_rgba(245,158,11,0.2)]'
+              : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60 border border-transparent'
+          }`}
+        >
+          <Lock className="w-4 h-4" />
+          <span>PDF Vault (Lock / Unlock)</span>
+        </button>
       </div>
 
       {/* Active Tab View */}
-      {activeTab === 'compress' ? <ArchiveCompressor /> : <ArchiveDecompressor />}
+      {activeTab === 'compress' ? (
+        <ArchiveCompressor />
+      ) : activeTab === 'decompress' ? (
+        <ArchiveDecompressor />
+      ) : (
+        <PdfLockerWorkstation />
+      )}
     </div>
   );
 };

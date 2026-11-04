@@ -9,13 +9,14 @@ import {
   Columns2,
   Database,
   Loader2,
+  Lock,
 } from 'lucide-react';
 import { HardwareCapabilities } from '../utils/hardwareEngine';
 import { WasmCacheStats } from '../utils/wasmCache';
 import { ComplianceTab } from './ComplianceModal';
 import { PWAInstallButton } from './PWAInstallButton';
 
-export type WorkspaceMode = 'media' | 'compressor' | 'split';
+export type WorkspaceMode = 'media' | 'compressor' | 'pdf' | 'split';
 
 interface HeaderProps {
   engineReady: boolean;
@@ -142,6 +143,20 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Archive className="w-3.5 h-3.5" />
             <span>ARCHIVE LAB</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onSelectWorkspace('pdf')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold tracking-wide transition-all cursor-pointer ${
+              activeWorkspace === 'pdf'
+                ? 'cyber-btn-primary shadow-md'
+                : 'text-zinc-400 hover:text-cyan-300 hover:bg-cyan-500/10'
+            }`}
+            title="Open Offline PDF Locker & Unlocker Vault"
+          >
+            <Lock className="w-3.5 h-3.5" />
+            <span>PDF VAULT</span>
           </button>
 
           <button
