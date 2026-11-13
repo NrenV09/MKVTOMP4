@@ -66,7 +66,6 @@ export async function detectHardwareCapabilities(): Promise<HardwareCapabilities
           console.warn('WebGPU device request fallback:', devErr);
         }
 
-        // Check adapter info
         if (adapter.info) {
           webgpu.adapterName = adapter.info.device || adapter.info.description || 'GPU Adapter';
           webgpu.vendor = adapter.info.vendor || 'Hardware Vendor';
@@ -85,6 +84,36 @@ export async function detectHardwareCapabilities(): Promise<HardwareCapabilities
       }
     } catch (e) {
       console.warn('WebGPU query note:', e);
+    }
+  }
+
+  // Fallback to WebGL UNMASKED_RENDERER_WEBGL to surface Adreno (Snapdragon) / Mali (MediaTek) details
+  if ((!webgpu.available || webgpu.adapterName === 'GPU Adapter') && typeof document !== 'undefined') {
+    try {
+      const canvas = document.createElement('canvas');
+      const gl =
+        (canvas.getContext('webgl2') as WebGLRenderingContext | null) ||
+        (canvas.getContext('webgl') as WebGLRenderingContext | null);
+      if (gl) {
+        const ext = gl.getExtension('WEBGL_debug_renderer_info');
+        const renderer = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+        if (typeof renderer === 'string' && renderer.trim()) {
+          if (/adreno|qualcomm/i.test(renderer)) {
+            webgpu.vendor = 'Qualcomm Snapdragon';
+            webgpu.adapterName = renderer.trim();
+            webgpu.description = `Qualcomm ${renderer.trim()}`;
+          } else if (/mali|immortalis|powervr/i.test(renderer)) {
+            webgpu.vendor = 'ARM / MediaTek';
+            webgpu.adapterName = renderer.trim();
+            webgpu.description = renderer.trim();
+          } else if (!webgpu.available) {
+            webgpu.adapterName = renderer.trim();
+            webgpu.description = renderer.trim();
+          }
+        }
+      }
+    } catch {
+      // ignore WebGL probe errors
     }
   }
 

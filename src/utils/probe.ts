@@ -347,6 +347,89 @@ export function getFileExtension(filename: string): string {
 }
 
 /**
+ * Inspects the first 4 KB of a File to determine its container extension when Android
+ * Scoped Storage / MediaPicker returns an extensionless content:// filename (e.g. "1000018294").
+ */
+export async function detectFileExtensionFromMagicBytes(file: File): Promise<string> {
+  const existing = getFileExtension(file.name);
+  if (existing && existing.length <= 6) return existing;
+
+  // Check MIME type first as fast hint
+  const mime = (file.type || '').toLowerCase();
+  if (mime === 'video/mp4') return '.mp4';
+  if (mime === 'video/quicktime') return '.mov';
+  if (mime === 'video/x-matroska' || mime === 'video/matroska') return '.mkv';
+  if (mime === 'video/webm') return '.webm';
+  if (mime === 'video/x-msvideo' || mime === 'video/avi') return '.avi';
+  if (mime === 'video/mp2t') return '.ts';
+  if (mime === 'audio/mpeg') return '.mp3';
+  if (mime === 'audio/wav' || mime === 'audio/x-wav') return '.wav';
+  if (mime === 'audio/flac') return '.flac';
+  if (mime === 'audio/ogg') return '.ogg';
+  if (mime === 'audio/mp4' || mime === 'audio/x-m4a') return '.m4a';
+
+  try {
+    const headerBuf = await file.slice(0, Math.min(file.size, 4096)).arrayBuffer();
+    const u8 = new Uint8Array(headerBuf);
+    if (u8.length < 12) return '';
+
+    // 1. EBML Header (Matroska .mkv or .webm)
+    if (u8[0] === 0x1a && u8[1] === 0x45 && u8[2] === 0xdf && u8[3] === 0xa3) {
+      let ascii = '';
+      for (let i = 0; i < Math.min(u8.length, 256); i++) {
+        ascii += u8[i] >= 32 && u8[i] <= 126 ? String.fromCharCode(u8[i]) : ' ';
+      }
+      if (ascii.toLowerCase().includes('webm')) return '.webm';
+      return '.mkv';
+    }
+
+    // 2. ISO BMFF ('ftyp' at byte offset 4) -> MP4 / MOV / M4A
+    if (u8[4] === 0x66 && u8[5] === 0x74 && u8[6] === 0x79 && u8[7] === 0x70) {
+      const brand = String.fromCharCode(u8[8], u8[9], u8[10], u8[11]).toLowerCase();
+      if (brand.startsWith('qt')) return '.mov';
+      if (brand === 'm4a ' || brand === 'm4b ') return '.m4a';
+      return '.mp4';
+    }
+
+    // 3. RIFF Container (AVI / WAV)
+    if (u8[0] === 0x52 && u8[1] === 0x49 && u8[2] === 0x46 && u8[3] === 0x46) {
+      const fourcc = String.fromCharCode(u8[8], u8[9], u8[10], u8[11]);
+      if (fourcc === 'AVI ') return '.avi';
+      if (fourcc === 'WAVE') return '.wav';
+    }
+
+    // 4. FLV ('FLV\x01')
+    if (u8[0] === 0x46 && u8[1] === 0x4c && u8[2] === 0x56 && u8[3] === 0x01) {
+      return '.flv';
+    }
+
+    // 5. MPEG-TS (0x47 sync byte every 188 bytes) or M2TS (every 192 bytes at offset 4)
+    if (u8.length > 380) {
+      if (u8[0] === 0x47 && u8[188] === 0x47 && u8[376] === 0x47) {
+        return '.ts';
+      }
+      if (u8[4] === 0x47 && u8[196] === 0x47 && u8[388] === 0x47) {
+        return '.m2ts';
+      }
+    }
+
+    // 6. Audio headers (FLAC, Ogg, MP3)
+    if (u8[0] === 0x66 && u8[1] === 0x4c && u8[2] === 0x61 && u8[3] === 0x43) return '.flac';
+    if (u8[0] === 0x4f && u8[1] === 0x67 && u8[2] === 0x67 && u8[3] === 0x53) return '.ogg';
+    if (
+      (u8[0] === 0x49 && u8[1] === 0x44 && u8[2] === 0x33) ||
+      (u8[0] === 0xff && (u8[1] & 0xe0) === 0xe0)
+    ) {
+      return '.mp3';
+    }
+  } catch {
+    // Ignore slice read failure
+  }
+
+  return '';
+}
+
+/**
  * Ultra-lightweight binary slice inspector for large files (> 150 MB).
  * Reads at most 4 MB from the start (and 4 MB from the end if MP4 moov is at the tail)
  * so iPadOS Safari / WebKit NEVER maps a 2-3 GB blob:// URL into AVFoundation memory.

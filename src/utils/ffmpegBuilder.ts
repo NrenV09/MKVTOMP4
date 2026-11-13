@@ -226,9 +226,21 @@ export function checkCompatibility(
   };
 }
 
+export type MobileSocVendor =
+  | 'qualcomm-snapdragon'
+  | 'mediatek'
+  | 'apple'
+  | 'exynos'
+  | 'tensor'
+  | 'generic';
+
 export interface DeviceCapabilities {
   isIPad: boolean;
   isApple: boolean;
+  isAndroid: boolean;
+  isMobile: boolean;
+  socVendor: MobileSocVendor;
+  gpuRenderer?: string;
   cores: number;
   isMSeries: boolean;
   hasWakeLock: boolean;
@@ -237,11 +249,44 @@ export interface DeviceCapabilities {
   chipLabel: string;
 }
 
+let cachedWebGLRenderer: string | undefined;
+
+function probeWebGLRendererString(): string | undefined {
+  if (cachedWebGLRenderer !== undefined) return cachedWebGLRenderer;
+  if (typeof document === 'undefined') return undefined;
+  try {
+    const canvas = document.createElement('canvas');
+    const gl =
+      (canvas.getContext('webgl2') as WebGLRenderingContext | null) ||
+      (canvas.getContext('webgl') as WebGLRenderingContext | null);
+    if (!gl) return undefined;
+    const ext = gl.getExtension('WEBGL_debug_renderer_info');
+    if (ext) {
+      const renderer = gl.getParameter(ext.UNMASKED_RENDERER_WEBGL);
+      if (typeof renderer === 'string' && renderer.trim()) {
+        cachedWebGLRenderer = renderer.trim();
+        return cachedWebGLRenderer;
+      }
+    }
+    const fallbackRenderer = gl.getParameter(gl.RENDERER);
+    if (typeof fallbackRenderer === 'string' && fallbackRenderer.trim()) {
+      cachedWebGLRenderer = fallbackRenderer.trim();
+      return cachedWebGLRenderer;
+    }
+  } catch {
+    // Ignore headless / restricted WebGL contexts
+  }
+  return undefined;
+}
+
 export function detectDeviceCapabilities(): DeviceCapabilities {
   if (typeof navigator === 'undefined') {
     return {
       isIPad: false,
       isApple: false,
+      isAndroid: false,
+      isMobile: false,
+      socVendor: 'generic',
       cores: 4,
       isMSeries: false,
       hasWakeLock: false,
@@ -252,23 +297,73 @@ export function detectDeviceCapabilities(): DeviceCapabilities {
   }
   const ua = navigator.userAgent || '';
   const isIPad = /iPad/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isAndroid = /Android/i.test(ua);
   const isApple = /Mac|iPad|iPhone/.test(ua) || isIPad;
+  const isMobile = isAndroid || isIPad || /iPhone|iPod|Mobile/i.test(ua);
   const cores = navigator.hardwareConcurrency || 4;
   const isMSeries = isApple && cores >= 8;
   const hasWakeLock = 'wakeLock' in navigator;
-  const hasSharedArrayBuffer = typeof SharedArrayBuffer !== 'undefined' && (typeof window !== 'undefined' && (window as any).crossOriginIsolated);
+  const hasSharedArrayBuffer =
+    typeof SharedArrayBuffer !== 'undefined' &&
+    typeof window !== 'undefined' &&
+    Boolean((window as any).crossOriginIsolated);
   const hasWebCodecs = typeof window !== 'undefined' && typeof (window as any).VideoEncoder !== 'undefined';
 
+  const gpuRenderer = probeWebGLRendererString();
+  const uaAndGpu = `${ua} ${gpuRenderer || ''}`.toLowerCase();
+
+  let socVendor: MobileSocVendor = 'generic';
   let chipLabel = 'Multi-Core CPU';
+
   if (isIPad) {
+    socVendor = 'apple';
     chipLabel = cores >= 8 ? 'Apple M3 / M-Series (iPad Air)' : 'Apple Silicon (iPad)';
   } else if (isApple) {
+    socVendor = 'apple';
     chipLabel = cores >= 8 ? 'Apple M-Series Silicon' : 'Apple Silicon';
+  } else if (isAndroid) {
+    if (/adreno|qualcomm|snapdragon|\bsm\d{4}\b|\bqti\b/.test(uaAndGpu)) {
+      socVendor = 'qualcomm-snapdragon';
+      const adrenoMatch = (gpuRenderer || '').match(/Adreno\s*\(?(?:TM)?\)?\s*([0-9]{3,4})/i);
+      chipLabel = adrenoMatch
+        ? `Qualcomm Snapdragon (Adreno ${adrenoMatch[1]})`
+        : 'Qualcomm Snapdragon (Adreno GPU)';
+    } else if (/mediatek|dimensity|helio|\bmt\d{4}\b|immortalis|powervr/.test(uaAndGpu)) {
+      socVendor = 'mediatek';
+      const maliMatch = (gpuRenderer || '').match(/(Immortalis-[A-Z0-9]+|Mali-[A-Z0-9]+)/i);
+      chipLabel = maliMatch
+        ? `MediaTek Dimensity/Helio (${maliMatch[1]})`
+        : 'MediaTek Dimensity / Helio';
+    } else if (/mali-g|mali/i.test(uaAndGpu)) {
+      if (/pixel/i.test(uaAndGpu)) {
+        socVendor = 'tensor';
+        chipLabel = 'Google Tensor (ARM Mali GPU)';
+      } else if (/samsung|sm-[gsafmn]\d/i.test(uaAndGpu)) {
+        socVendor = 'exynos';
+        chipLabel = 'Samsung Exynos / Mali GPU';
+      } else {
+        // Most Mali-G Android devices (Xiaomi/Redmi/Poco/Oppo/Realme/Vivo/Tecno/Infinix) run MediaTek SoCs
+        socVendor = 'mediatek';
+        const maliMatch = (gpuRenderer || '').match(/(Mali-[A-Z0-9]+)/i);
+        chipLabel = maliMatch
+          ? `MediaTek / ARM Mali (${maliMatch[1]})`
+          : 'Android ARM64 (MediaTek / Mali)';
+      }
+    } else if (/xclipse/i.test(uaAndGpu)) {
+      socVendor = 'exynos';
+      chipLabel = 'Samsung Exynos (Xclipse GPU)';
+    } else {
+      chipLabel = `Android Multi-Core (${cores}T)`;
+    }
   }
 
   return {
     isIPad,
     isApple,
+    isAndroid,
+    isMobile,
+    socVendor,
+    gpuRenderer,
     cores,
     isMSeries,
     hasWakeLock,
@@ -286,8 +381,11 @@ export function buildFFmpegArgs(
 ): string[] {
   const args: string[] = [];
 
-  // Multi-threading optimization: -threads 0 lets FFmpeg use all available WebAssembly worker threads
+  // Multi-threading optimization: -threads 0 lets FFmpeg use available worker threads
   args.push('-threads', '0');
+
+  // Generate missing PTS/DTS on VFR Android screen recordings, camera clips, and MPEG-TS/MKV streams
+  args.push('-fflags', '+genpts');
 
   // Input file
   args.push('-i', inputFilename);
@@ -524,6 +622,14 @@ export function buildFFmpegArgs(
         args.push('-c:a', 'copy');
       }
     }
+
+    // Automatically convert ADTS AAC streams (.ts, .m2ts, .flv, .aac) to MP4 AudioSpecificConfig
+    const srcExt = (source?.extension || '').toLowerCase();
+    const isAdtsSource = ['.ts', '.m2ts', '.mts', '.flv', '.aac'].includes(srcExt);
+    const audioCodecUsed = (source?.audioCodec || '').toLowerCase();
+    if (isAppleTarget && isAdtsSource && (!audioCodecUsed || audioCodecUsed.includes('aac'))) {
+      args.push('-bsf:a', 'aac_adtstoasc');
+    }
   } else {
     args.push('-c:a', config.audioCodec);
 
@@ -560,6 +666,11 @@ export function buildFFmpegArgs(
     }
   } else if (config.subtitleMode === 'drop') {
     args.push('-sn');
+  }
+
+  // Drop incompatible private data/telemetry tracks (tmcd, gpmd, bin_data) that break mobile MP4/MKV muxers
+  if (['mp4', 'mov', 'mkv', 'avi'].includes(config.container)) {
+    args.push('-dn');
   }
 
   // 5. Retain Language & Title Metadata Tags on Mapped Streams
@@ -599,8 +710,15 @@ export function buildFFmpegArgs(
     });
   }
 
-  // 6. Always inject -movflags +faststart for MP4/MOV when fastStart is enabled (default true)
-  // Places the MP4 moov atom at the front of the file for immediate playback and web compatibility
+  // 6. Remux stability for Snapdragon/MediaTek Android MediaCodec & VFR containers:
+  // Normalize negative timestamps to zero and raise muxing queue size for 4K/60fps & multi-track files
+  if (config.videoCodec === 'copy' || config.audioCodec === 'copy') {
+    args.push('-avoid_negative_ts', 'make_zero');
+  }
+  args.push('-max_muxing_queue_size', '4096');
+
+  // 7. Always inject -movflags +faststart for MP4/MOV when fastStart is enabled (default true)
+  // Places the MP4 moov atom at the front of the file for immediate playback and seeking on Android & iOS
   if (isAppleTarget && config.fastStart !== false) {
     args.push('-movflags', '+faststart');
   }
@@ -686,6 +804,32 @@ export function diagnoseFFmpegFailure(
       explanation: `One or more source streams (${source?.videoCodec?.toUpperCase() || 'video'}/${source?.audioCodec?.toUpperCase() || 'audio'}) cannot be copied directly into a .${config.container.toUpperCase()} container without transcoding.`,
       suggestion:
         'Switch Video Codec to H.264 (libx264) and Audio Codec to AAC, or change the output container to .MKV which accepts virtually all codecs.',
+    };
+  }
+
+  // 4.5. Malformed AAC ADTS Bitstream (.ts/.m2ts/.flv -> .mp4)
+  if (combined.includes('aac_adtstoasc') || combined.includes('malformed aac bitstream')) {
+    return {
+      title: 'AAC Bitstream Header Requires ADTS-to-ASC Filter',
+      explanation:
+        'The source AAC audio stream uses raw ADTS transport headers (.ts/.m2ts/.flv) that must be converted to MP4 AudioSpecificConfig frames.',
+      suggestion:
+        'Retry remuxing with AAC audio transcoding enabled or ensure the ADTS bitstream filter (-bsf:a aac_adtstoasc) is applied.',
+    };
+  }
+
+  // 4.6. Non-Monotonic DTS / Unset Timestamps (VFR Screen Recorders & Android Streams)
+  if (
+    combined.includes('non-monotonous dts') ||
+    combined.includes('timestamps are unset') ||
+    combined.includes('too many packets buffered')
+  ) {
+    return {
+      title: 'Container Timestamp / Packet Buffer Mismatch',
+      explanation:
+        'The source file contains irregular VFR timestamps or packet ordering discontinuities that exceeded the muxer buffer.',
+      suggestion:
+        'Try setting Audio Encoder to AAC (while keeping Video on Stream Copy) or use H.264 Fast Transcode to regenerate clean timestamps.',
     };
   }
 

@@ -29,11 +29,17 @@ const ERROR_NOT_LOADED = new Error('ffmpeg is not loaded, call `await ffmpeg.loa
 const ERROR_IMPORT_FAILURE = new Error('failed to import ffmpeg-core.js');
 
 /**
- * 16 MB Page size for Paged Blob Storage fallback when OPFS SyncAccessHandle is unavailable.
- * Caps active Uint8Array memory at <= 64 MB (4 pages) even when remuxing 2-10 GB files!
+ * Adaptive Page size for Paged Blob Storage fallback when OPFS SyncAccessHandle is unavailable.
+ * Uses 8 MB pages (32 MB max RAM) on Android/Mobile (Snapdragon/MediaTek/iOS) to respect mobile LMKD limits,
+ * and 16 MB pages (64 MB max RAM) on Desktop / iPad M-Series.
  */
-const PAGE_SIZE = 16 * 1024 * 1024; // 16 MB
-const MAX_RAM_PAGES = 4; // Max 64 MB of active Uint8Array buffers in RAM per file
+const IS_ANDROID_WORKER =
+  typeof self !== 'undefined' && /Android/i.test((self as any).navigator?.userAgent || '');
+const IS_MOBILE_WORKER =
+  typeof self !== 'undefined' &&
+  /Android|iPhone|iPad|iPod|Mobile/i.test((self as any).navigator?.userAgent || '');
+const PAGE_SIZE = IS_MOBILE_WORKER ? 8 * 1024 * 1024 : 16 * 1024 * 1024; // 8 MB mobile / 16 MB desktop
+const MAX_RAM_PAGES = 4; // Max 32 MB (mobile) or 64 MB (desktop) active Uint8Array buffers in RAM per file
 
 interface DiskPage {
   u8: Uint8Array | null;
@@ -531,15 +537,34 @@ const load = async ({
   const coreURL = _coreURL;
   const wasmURL = _wasmURL ? _wasmURL : _coreURL.replace(/.js$/g, '.wasm');
   const workerURL = _workerURL ? _workerURL : _coreURL.replace(/.js$/g, '.worker.js');
+  const mainScriptUrlOrBlob = `${coreURL}#${btoa(JSON.stringify({ wasmURL, workerURL }))}`;
 
-  ffmpeg = await (self as any).createFFmpegCore({
-    // Cap initial SharedArrayBuffer memory at 256 MB (instead of 1024 MB default)
-    // so iPadOS Safari / WebKit retains 768 MB of extra headroom for multi-GB operations.
-    INITIAL_MEMORY: 268435456,
-    mainScriptUrlOrBlob: `${coreURL}#${btoa(JSON.stringify({ wasmURL, workerURL }))}`,
-  });
+  // Android Snapdragon/MediaTek Chrome renderers (especially 4-6 GB RAM / 32-bit WebView) can throw OOM
+  // on 256 MB contiguous WASM memory. Use 128 MB on Android and gracefully step down to 64 MB if needed.
+  const initialMemoryTargets = IS_ANDROID_WORKER
+    ? [134217728, 67108864, undefined]
+    : [268435456, 134217728, undefined];
 
-  // Upgrade MEMFS to support multi-gigabyte files via OPFS + 16 MB Paged Blob Storage
+  let lastLoadErr: any = null;
+  for (const initialMem of initialMemoryTargets) {
+    try {
+      const moduleArgs: Record<string, any> = { mainScriptUrlOrBlob };
+      if (initialMem !== undefined) {
+        moduleArgs.INITIAL_MEMORY = initialMem;
+      }
+      ffmpeg = await (self as any).createFFmpegCore(moduleArgs);
+      lastLoadErr = null;
+      break;
+    } catch (memErr) {
+      lastLoadErr = memErr;
+    }
+  }
+
+  if (lastLoadErr && !ffmpeg) {
+    throw lastLoadErr;
+  }
+
+  // Upgrade MEMFS to support multi-gigabyte files via OPFS + Paged Blob Storage
   installLargeFilePagedFS(ffmpeg);
 
   ffmpeg.setLogger((data: any) => self.postMessage({ type: FFMessageType.LOG, data }));
@@ -639,10 +664,14 @@ const mount = ({
   options: any;
   mountPoint: string;
 }) => {
-  const fs = ffmpeg.FS.filesystems[fsType];
-  if (!fs) return false;
-  ffmpeg.FS.mount(fs, options, mountPoint);
-  return true;
+  try {
+    const fs = ffmpeg.FS.filesystems[fsType];
+    if (!fs) return false;
+    ffmpeg.FS.mount(fs, options, mountPoint);
+    return true;
+  } catch {
+    return false;
+  }
 };
 
 const unmount = ({ mountPoint }: { mountPoint: string }) => {

@@ -40,7 +40,13 @@ import {
   detectDeviceCapabilities,
   diagnoseFFmpegFailure
 } from './utils/ffmpegBuilder';
-import { parseFFmpegProbeLogs, probeMediaElement, AUDIO_EXTENSIONS, getFileExtension } from './utils/probe';
+import {
+  parseFFmpegProbeLogs,
+  probeMediaElement,
+  AUDIO_EXTENSIONS,
+  getFileExtension,
+  detectFileExtensionFromMagicBytes,
+} from './utils/probe';
 import { 
   detectHardwareCapabilities, 
   transcodeWithHardwareWebCodecs, 
@@ -345,8 +351,19 @@ export default function App() {
       addLog('system', `Detected hardware: ${dev.chipLabel} (${dev.cores} concurrent threads, Cross-Origin Isolation: ${hasSAB ? 'Active' : 'Standby'}).`);
       addLog('system', 'Loading self-contained in-app FFmpeg binaries (zero internet connection required)...');
 
+      // On Android Snapdragon & MediaTek phones, SharedArrayBuffer pthread pools (core-mt) frequently trigger
+      // 32-bit/LMKD memory exhaustion or Big.LITTLE Atomics stalls while providing 0x benefit to stream-copy remuxing.
+      // Prefer the low-memory single-threaded I/O worker on Android for rock-solid remuxing.
+      const preferAndroidSafeSingleThread = dev.isAndroid;
+      if (preferAndroidSafeSingleThread && hasSAB) {
+        addLog(
+          'system',
+          `Android SoC safeguard (${dev.chipLabel}): using low-memory single-thread I/O core for stable multi-GB remuxing.`
+        );
+      }
+
       let mtLoaded = false;
-      if (hasSAB) {
+      if (hasSAB && !preferAndroidSafeSingleThread) {
         try {
           addLog('system', `Mounting local multi-threaded engine for all ${dev.cores} hardware CPU cores...`);
           // Resolve local in-app URLs served directly from the app
@@ -455,10 +472,14 @@ export default function App() {
     setConversionDiagnostic(null);
     setIsProbing(true);
 
-    const ext = getFileExtension(file.name);
+    const detectedExt = await detectFileExtensionFromMagicBytes(file);
+    const ext = detectedExt || getFileExtension(file.name);
     const isAudioOnly = AUDIO_EXTENSIONS.includes(ext) || (file.type ? file.type.startsWith('audio/') : false);
 
-    addLog('system', `Loaded source file: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
+    addLog(
+      'system',
+      `Loaded source file: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB${ext ? `, container ${ext}` : ''})`
+    );
 
     // 1. Initial fast probe (4 MB binary slice for >150 MB files, HTML5 metadata for small files)
     const htmlMeta = await probeMediaElement(file);
@@ -897,12 +918,14 @@ export default function App() {
       };
 
       // Pipeline selection:
+      const devCaps = detectDeviceCapabilities();
+      const hwMaxBytes = devCaps.isAndroid ? 120 * 1024 * 1024 : 300 * 1024 * 1024;
       const isVideoTarget = config.targetCategory === 'video' && config.container !== 'gif';
       const isCopy = isVideoTarget && config.videoCodec === 'copy';
       const isTargetMp4 = config.container === 'mp4';
-      // Disable WebCodecs whole-buffer demuxing for files > 300 MB so multi-GB files always use streaming WORKERFS + OPFS/Paged FS
+      // Disable WebCodecs whole-buffer demuxing for large files so mobile devices always use streaming WORKERFS + OPFS/Paged FS
       const canHardwareWebCodecs =
-        rawFile.size <= 300 * 1024 * 1024 &&
+        rawFile.size <= hwMaxBytes &&
         isVideoTarget &&
         !isCopy &&
         config.hardwareAcceleration !== false &&
@@ -917,13 +940,58 @@ export default function App() {
         // DIRECT STREAM COPY (Instant passthrough with automatic smart fallback)
         setTelemetry((prev) => ({
           ...prev,
-          accelerationMode: 'Direct Stream Copy (Zero-Copy Disk Stream)',
+          accelerationMode: devCaps.isAndroid
+            ? `Direct Stream Copy (${devCaps.chipLabel})`
+            : 'Direct Stream Copy (Zero-Copy Disk Stream)',
         }));
-        addLog('system', 'Direct stream copy enabled. Zero re-encoding passthrough pipeline (OPFS / 16 MB Paged Storage).');
+        addLog('system', 'Direct stream copy enabled. Zero re-encoding passthrough pipeline (OPFS / Paged Storage).');
+        probeLogsBuffer.current = [];
         executedCommand = buildFFmpegArgs(virtualIn, virtualOut, config, effectiveMeta);
         addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
 
         let returnCode = await ffmpeg.exec(executedCommand);
+
+        // Fallback 0a: If MPEG-TS/FLV/MKV AAC ADTS bitstream filter is required for MP4/MOV
+        const recentErrLog = probeLogsBuffer.current.slice(-40).join('\n').toLowerCase();
+        if (
+          returnCode !== 0 &&
+          (config.container === 'mp4' || config.container === 'mov') &&
+          !executedCommand.includes('aac_adtstoasc') &&
+          (recentErrLog.includes('aac_adtstoasc') || recentErrLog.includes('malformed aac'))
+        ) {
+          addLog('system', 'Detected raw ADTS AAC stream. Applying -bsf:a aac_adtstoasc bitstream filter for MP4...');
+          try { await ffmpeg.deleteFile(virtualOut); } catch {}
+          const bsfCmd = [
+            ...executedCommand.slice(0, -1),
+            '-bsf:a',
+            'aac_adtstoasc',
+            executedCommand[executedCommand.length - 1],
+          ];
+          executedCommand = bsfCmd;
+          addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
+          returnCode = await ffmpeg.exec(executedCommand);
+        }
+
+        // Fallback 0b: If MP4/MOV subtitle conversion (mov_text) caused mux failure, retry stream copy without subtitles
+        if (
+          returnCode !== 0 &&
+          config.subtitleMode !== 'drop' &&
+          (effectiveMeta.subtitleTracks?.length || 0) > 0
+        ) {
+          addLog(
+            'system',
+            `Subtitle stream incompatible with .${config.container} remux. Retrying lossless video+audio copy with subtitles omitted (-sn)...`
+          );
+          try { await ffmpeg.deleteFile(virtualOut); } catch {}
+          executedCommand = buildFFmpegArgs(
+            virtualIn,
+            virtualOut,
+            { ...config, subtitleMode: 'drop', selectedSubtitleTrackIndices: [] },
+            effectiveMeta
+          );
+          addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
+          returnCode = await ffmpeg.exec(executedCommand);
+        }
 
         // Fallback A: If direct stream copy failed and audio was 'copy', transcode audio to AAC/Opus while keeping video stream copy
         if (returnCode !== 0 && config.audioCodec === 'copy' && effectiveMeta.hasAudio) {
@@ -958,7 +1026,7 @@ export default function App() {
           );
           setTelemetry((prev) => ({
             ...prev,
-            accelerationMode: 'Auto-Transcode Fallback (Multi-Core Wasm)',
+            accelerationMode: 'Auto-Transcode Fallback (CPU Wasm)',
           }));
           try { await ffmpeg.deleteFile(virtualOut); } catch {}
           executedCommand = buildFFmpegArgs(
