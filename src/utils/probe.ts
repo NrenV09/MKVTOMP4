@@ -106,7 +106,7 @@ export function parseFFmpegProbeLogs(logs: string[]): Partial<SourceMetadata> {
     // Stream #0:2(eng): Subtitle: subrip (default) (forced)
     // Stream #0:3: Attachment: ttf
     const streamMatch = trimmed.match(
-      /^Stream #0:(\d+)(?:\[[^\]]+\])?(?:\(([a-zA-Z0-9_-]+)\))?:\s*(Video|Audio|Subtitle|Attachment|Data):\s*(.*)$/i
+      /^Stream #0:(\d+)(?:\[[^\]]+\])?(?:\(([^)]+)\))?(?:\[[^\]]+\])?:\s*(Video|Audio|Subtitle|Attachment|Data):\s*(.*)$/i
     );
 
     if (streamMatch) {
@@ -197,6 +197,9 @@ export function parseFFmpegProbeLogs(logs: string[]): Partial<SourceMetadata> {
             }
           }
         } else {
+          // FFmpeg still indexes attached cover art as a video stream specifier (0:v:N),
+          // so advance videoTypeCounter to keep subsequent 0:v:X indices aligned.
+          videoTypeCounter++;
           // Treat attached cover image as attachment
           const att: AttachmentInfo = {
             streamIndex,

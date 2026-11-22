@@ -900,7 +900,16 @@ export default function App() {
             audioSampleRate: parsed.audioSampleRate || effectiveMeta.audioSampleRate,
             audioChannels: parsed.audioChannels || effectiveMeta.audioChannels,
             bitrate: parsed.bitrate || effectiveMeta.bitrate,
+            pixelFormat: parsed.pixelFormat || effectiveMeta.pixelFormat,
+            is10Bit: parsed.is10Bit ?? effectiveMeta.is10Bit,
+            is4K: parsed.is4K ?? effectiveMeta.is4K,
+            isHighBitrate: parsed.isHighBitrate ?? effectiveMeta.isHighBitrate,
             parsedStreams: parsed.parsedStreams || effectiveMeta.parsedStreams,
+            videoTracks: parsed.videoTracks || effectiveMeta.videoTracks,
+            audioTracks: parsed.audioTracks || effectiveMeta.audioTracks,
+            subtitleTracks: parsed.subtitleTracks || effectiveMeta.subtitleTracks,
+            chapters: parsed.chapters || effectiveMeta.chapters,
+            attachments: parsed.attachments || effectiveMeta.attachments,
             hasVideo: parsed.hasVideo ?? effectiveMeta.hasVideo,
             hasAudio: parsed.hasAudio ?? effectiveMeta.hasAudio,
           };
@@ -983,11 +992,39 @@ export default function App() {
             `Subtitle stream incompatible with .${config.container} remux. Retrying lossless video+audio copy with subtitles omitted (-sn)...`
           );
           try { await ffmpeg.deleteFile(virtualOut); } catch {}
+          probeLogsBuffer.current = [];
           executedCommand = buildFFmpegArgs(
             virtualIn,
             virtualOut,
             { ...config, subtitleMode: 'drop', selectedSubtitleTrackIndices: [] },
             effectiveMeta
+          );
+          addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
+          returnCode = await ffmpeg.exec(executedCommand);
+        }
+
+        // Fallback 0c: If an explicit -map specifier failed to resolve, retry with safe auto stream mapping
+        const mapErrLog = probeLogsBuffer.current.slice(-40).join('\n').toLowerCase();
+        if (returnCode !== 0 && mapErrLog.includes('matches no streams')) {
+          addLog('system', 'Explicit track index mismatch detected; retrying with container auto stream mapping...');
+          try { await ffmpeg.deleteFile(virtualOut); } catch {}
+          probeLogsBuffer.current = [];
+          executedCommand = buildFFmpegArgs(
+            virtualIn,
+            virtualOut,
+            {
+              ...config,
+              selectedVideoTrackIndices: undefined,
+              selectedAudioTrackIndices: undefined,
+              selectedSubtitleTrackIndices: [],
+              subtitleMode: 'drop',
+            },
+            {
+              ...effectiveMeta,
+              videoTracks: undefined,
+              audioTracks: undefined,
+              subtitleTracks: undefined,
+            }
           );
           addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
           returnCode = await ffmpeg.exec(executedCommand);
@@ -1176,9 +1213,37 @@ export default function App() {
           ...prev,
           accelerationMode: 'Multi-threaded CPU Wasm',
         }));
+        probeLogsBuffer.current = [];
         executedCommand = buildFFmpegArgs(virtualIn, virtualOut, config, effectiveMeta);
         addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
         let returnCode = await ffmpeg.exec(executedCommand);
+
+        // If explicit -map specifier failed to resolve, retry with safe container auto stream mapping
+        const cpuMapErr = probeLogsBuffer.current.slice(-40).join('\n').toLowerCase();
+        if (returnCode !== 0 && cpuMapErr.includes('matches no streams')) {
+          addLog('system', 'Explicit track index mismatch detected; retrying with container auto stream mapping...');
+          try { await ffmpeg.deleteFile(virtualOut); } catch {}
+          probeLogsBuffer.current = [];
+          executedCommand = buildFFmpegArgs(
+            virtualIn,
+            virtualOut,
+            {
+              ...config,
+              selectedVideoTrackIndices: undefined,
+              selectedAudioTrackIndices: undefined,
+              selectedSubtitleTrackIndices: [],
+              subtitleMode: 'drop',
+            },
+            {
+              ...effectiveMeta,
+              videoTracks: undefined,
+              audioTracks: undefined,
+              subtitleTracks: undefined,
+            }
+          );
+          addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
+          returnCode = await ffmpeg.exec(executedCommand);
+        }
 
         // If audio stream copy failed during audio extraction or video encode, retry with native container audio codec
         if (returnCode !== 0 && config.audioCodec === 'copy') {

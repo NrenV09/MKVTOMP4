@@ -397,14 +397,19 @@ export function buildFFmpegArgs(
   if (config.targetCategory === 'audio') {
     args.push('-vn'); // no video
 
-    // If user selected a specific audio track, map the first selected one
+    // If user selected a specific audio track, validate it against probed audioTracks
     if (
       source?.audioTracks &&
       source.audioTracks.length > 0 &&
       config.selectedAudioTrackIndices &&
       config.selectedAudioTrackIndices.length > 0
     ) {
-      args.push('-map', `0:a:${config.selectedAudioTrackIndices[0]}`);
+      const validAudioIdx = config.selectedAudioTrackIndices.find((idx) =>
+        source.audioTracks!.some((a) => a.typeIndex === idx)
+      );
+      if (validAudioIdx !== undefined) {
+        args.push('-map', `0:a:${validAudioIdx}`);
+      }
     }
 
     if (config.audioCodec === 'copy') {
@@ -456,22 +461,52 @@ export function buildFFmpegArgs(
         (source.subtitleTracks && source.subtitleTracks.length > 0))
   );
 
-  // Determine selected tracks when probed metadata is available
-  const selectedVideoIndices =
+  // Determine selected tracks when probed metadata is available, validating against actual existing tracks
+  const probedVideoTypeIndices = new Set((source?.videoTracks || []).map((v) => v.typeIndex));
+  const probedAudioTypeIndices = new Set((source?.audioTracks || []).map((a) => a.typeIndex));
+
+  const rawSelectedVideoIndices =
     config.selectedVideoTrackIndices && config.selectedVideoTrackIndices.length > 0
       ? config.selectedVideoTrackIndices
       : source?.videoTracks && source.videoTracks.length > 0
       ? [source.videoTracks[0].typeIndex]
-      : [0];
+      : source?.hasVideo
+      ? [0]
+      : [];
 
-  const selectedAudioIndices =
+  const selectedVideoIndices =
+    probedVideoTypeIndices.size > 0
+      ? rawSelectedVideoIndices.filter((idx) => probedVideoTypeIndices.has(idx))
+      : source?.videoTracks && source.videoTracks.length === 0
+      ? []
+      : rawSelectedVideoIndices;
+
+  // Ensure at least one valid video track is selected if videoTracks exist
+  if (
+    selectedVideoIndices.length === 0 &&
+    source?.videoTracks &&
+    source.videoTracks.length > 0
+  ) {
+    selectedVideoIndices.push(source.videoTracks[0].typeIndex);
+  }
+
+  const rawSelectedAudioIndices =
     config.audioCodec === 'none'
       ? []
       : config.selectedAudioTrackIndices !== undefined
       ? config.selectedAudioTrackIndices
       : source?.audioTracks
       ? source.audioTracks.map((a) => a.typeIndex)
-      : [0];
+      : source?.hasAudio
+      ? [0]
+      : [];
+
+  const selectedAudioIndices =
+    probedAudioTypeIndices.size > 0
+      ? rawSelectedAudioIndices.filter((idx) => probedAudioTypeIndices.has(idx))
+      : source?.audioTracks && source.audioTracks.length === 0
+      ? []
+      : rawSelectedAudioIndices;
 
   // Filter subtitle tracks: drop bitmap subtitles (PGS/VobSub) when targeting MP4/MOV or WebM
   const rawSelectedSubIndices =
@@ -496,11 +531,13 @@ export function buildFFmpegArgs(
 
   // 1. Explicit Stream Mapping (-map 0:v:X, -map 0:a:X, -map 0:s:X)
   if (hasProbedTracks) {
-    for (const vIdx of selectedVideoIndices) {
-      args.push('-map', `0:v:${vIdx}`);
+    if (selectedVideoIndices.length > 0 && (source?.videoTracks?.length || source?.hasVideo)) {
+      for (const vIdx of selectedVideoIndices) {
+        args.push('-map', `0:v:${vIdx}`);
+      }
     }
 
-    if (selectedAudioIndices.length > 0 && source?.hasAudio) {
+    if (selectedAudioIndices.length > 0 && (source?.audioTracks?.length || source?.hasAudio)) {
       for (const aIdx of selectedAudioIndices) {
         args.push('-map', `0:a:${aIdx}`);
       }
@@ -833,8 +870,12 @@ export function diagnoseFFmpegFailure(
     };
   }
 
-  // 5. Invalid stream mapping
-  if (combined.includes('matches no streams') || combined.includes('stream map')) {
+  // 5. Invalid stream mapping (must check exact FFmpeg map errors; NEVER match the normal "Stream mapping:" header!)
+  if (
+    combined.includes('matches no streams') ||
+    /stream map ['"][^'"]+['"]/.test(combined) ||
+    combined.includes('does not contain any stream')
+  ) {
     return {
       title: 'Selected Stream Track Not Found in Container',
       explanation:
@@ -844,14 +885,24 @@ export function diagnoseFFmpegFailure(
     };
   }
 
+  // Extract the most relevant concrete error line from FFmpeg stderr logs
+  const specificErrLine = [...recentLogs]
+    .reverse()
+    .find((line) =>
+      /error|invalid|could not|failed|unable|unsupported|unknown|denied|conversion failed|moov atom not found/i.test(
+        line
+      )
+    );
+
   return {
     title: typeof exitCodeOrError === 'number' ? `FFmpeg Exited with Code ${exitCodeOrError}` : 'Media Processing Pipeline Error',
-    explanation:
-      typeof exitCodeOrError === 'string' && exitCodeOrError.length < 220
-        ? exitCodeOrError
-        : 'The container streams encountered a muxing or codec constraint during processing.',
+    explanation: specificErrLine
+      ? specificErrLine.trim().slice(0, 260)
+      : typeof exitCodeOrError === 'string' && exitCodeOrError.length < 220
+      ? exitCodeOrError
+      : 'The container streams encountered a muxing or codec constraint during processing.',
     suggestion:
-      'If using Stream Copy on an MKV file, ensure Audio is set to AAC (or Conditional AAC) and bitmap subtitles (PGS/VobSub) are unchecked for MP4 output.',
+      'Open the Telemetry Console to inspect the exact FFmpeg stream log, or switch Video/Audio from Stream Copy to H.264 + AAC.',
   };
 }
 
