@@ -1,4 +1,5 @@
 import { EncodingConfig, SourceMetadata, ContainerFormat } from '../types';
+import { computeTargetVideoBitrateBps } from './hardwareEngine';
 
 export function formatBytes(bytes: number, decimals = 2): string {
   if (!bytes || bytes === 0) return '0 B';
@@ -603,18 +604,36 @@ export function buildFFmpegArgs(
       }
     }
 
-    // Rate control
-    if (config.rateControl === 'crf') {
+    // Rate control (Target Size MB, CRF, or explicit Bitrate)
+    if (
+      config.compressionPreset === 'target-size' &&
+      config.targetSizeMB &&
+      config.targetSizeMB > 0 &&
+      source?.duration &&
+      source.duration > 0
+    ) {
+      const targetBps = computeTargetVideoBitrateBps(source, config);
+      const targetKbps = Math.max(180, Math.round(targetBps / 1000));
+      const maxRateKbps = Math.round(targetKbps * 1.25);
+      const bufSizeKbps = Math.round(targetKbps * 2);
+      args.push('-b:v', `${targetKbps}k`, '-maxrate', `${maxRateKbps}k`, '-bufsize', `${bufSizeKbps}k`);
+    } else if (config.rateControl === 'crf') {
       args.push('-crf', config.crf.toString());
     } else {
       args.push('-b:v', config.videoBitrate);
     }
 
-    // Video filters (Resolution & Framerate)
+    // Video filters (Resolution & Framerate — preserve aspect ratio without black bars or upscaling)
     const filters: string[] = [];
     if (config.resolution !== 'source') {
-      const [w, h] = config.resolution.split('x');
-      filters.push(`scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2`);
+      const [rawW, rawH] = config.resolution.split('x').map(Number);
+      const isPortrait = Boolean(source?.height && source?.width && source.height > source.width);
+      const maxW = isPortrait ? Math.min(rawW, rawH) : Math.max(rawW, rawH);
+      const maxH = isPortrait ? Math.max(rawW, rawH) : Math.min(rawW, rawH);
+      filters.push(
+        `scale='min(iw,${maxW})':'min(ih,${maxH})':force_original_aspect_ratio=decrease`,
+        'scale=trunc(iw/2)*2:trunc(ih/2)*2'
+      );
     } else {
       filters.push('scale=trunc(iw/2)*2:trunc(ih/2)*2');
     }

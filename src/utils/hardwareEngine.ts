@@ -1,12 +1,14 @@
 /**
- * Hardware Acceleration & WebGPU Engine
+ * Hardware Acceleration & WebCodecs Compression Engine
  * Integrates:
- * 1. WebGPU (navigator.gpu) - GPU device, adapter, limits, hardware shader/texture pipeline
+ * 1. WebGPU / WebGL GPU adapter probing (Snapdragon Adreno, MediaTek Mali/Immortalis, Apple Silicon)
  * 2. WebCodecs (VideoEncoder, VideoDecoder) with hardwareAcceleration: 'prefer-hardware'
- * 3. MP4-Muxer for zero-copy hardware multiplexing
+ * 3. Chunked StreamTarget MP4-Muxer + zero-copy MP4 fast-start for low-RAM mobile compression
  */
 
-import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
+import { Muxer, StreamTarget } from 'mp4-muxer';
+import { EncodingConfig, ResolutionPreset, SourceMetadata } from '../types';
+import { relocateMoovToFrontZeroCopy } from './mp4FastStart';
 
 // Stub missing WebGPU types for TS compilation
 type GPUDevice = any;
@@ -34,8 +36,272 @@ export interface HardwareCapabilities {
   hardwareAccelerationSupported: boolean;
 }
 
+export interface CompressionEstimate {
+  estimatedBytes: number;
+  savingsPercent: number;
+  targetVideoBps: number;
+  targetAudioBps: number;
+}
+
+export interface HardwareEncodeResult {
+  blob: Blob;
+  codecUsed: string;
+  isHevc: boolean;
+  width: number;
+  height: number;
+  bitrateBps: number;
+}
+
 let cachedCapabilities: HardwareCapabilities | null = null;
 let activeGpuDevice: GPUDevice | null = null;
+
+/**
+ * Parses a human bitrate string ("2500k", "4M", "2.5m", "1500000") into bits per second.
+ */
+export function parseBitrateToBps(value?: string): number | null {
+  if (!value) return null;
+  const trimmed = value.trim().toLowerCase();
+  const match = trimmed.match(/^(\d+(?:\.\d+)?)\s*([km])?(?:bps|b\/s)?$/);
+  if (!match) return null;
+  const num = parseFloat(match[1]);
+  if (!Number.isFinite(num) || num <= 0) return null;
+  const unit = match[2];
+  if (unit === 'm') return Math.round(num * 1_000_000);
+  if (unit === 'k') return Math.round(num * 1_000);
+  return num < 100_000 ? Math.round(num * 1_000) : Math.round(num);
+}
+
+/**
+ * Resolves output dimensions preserving source aspect ratio (portrait or landscape),
+ * without upscaling above source dimensions, rounded to even pixels for H.264/HEVC.
+ */
+export function resolveTargetDimensions(
+  sourceWidth: number,
+  sourceHeight: number,
+  resolution: ResolutionPreset
+): { width: number; height: number } {
+  const safeSrcW = Math.max(2, Math.round((sourceWidth || 1920) / 2) * 2);
+  const safeSrcH = Math.max(2, Math.round((sourceHeight || 1080) / 2) * 2);
+
+  if (resolution === 'source') {
+    return { width: safeSrcW, height: safeSrcH };
+  }
+
+  const parts = resolution.split('x').map(Number);
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    return { width: safeSrcW, height: safeSrcH };
+  }
+
+  const isPortrait = safeSrcH > safeSrcW;
+  const maxW = isPortrait ? Math.min(parts[0], parts[1]) : Math.max(parts[0], parts[1]);
+  const maxH = isPortrait ? Math.max(parts[0], parts[1]) : Math.min(parts[0], parts[1]);
+
+  // Never upscale during compression
+  if (safeSrcW <= maxW && safeSrcH <= maxH) {
+    return { width: safeSrcW, height: safeSrcH };
+  }
+
+  const scale = Math.min(maxW / safeSrcW, maxH / safeSrcH);
+  const width = Math.max(2, Math.round((safeSrcW * scale) / 2) * 2);
+  const height = Math.max(2, Math.round((safeSrcH * scale) / 2) * 2);
+  return { width, height };
+}
+
+/**
+ * Estimates effective audio bitrate in bps for compression size calculations.
+ */
+export function parseAudioBitrateBps(
+  config: EncodingConfig,
+  source?: SourceMetadata | null
+): number {
+  if (config.audioCodec === 'none' || (source && !source.hasAudio)) return 0;
+
+  const trackCount =
+    config.selectedAudioTrackIndices !== undefined
+      ? Math.max(0, config.selectedAudioTrackIndices.length)
+      : source?.audioTracks?.length || (source?.hasAudio ? 1 : 0);
+
+  if (trackCount === 0) return 0;
+
+  if (config.audioCodec === 'copy') {
+    const selectedTracks =
+      source?.audioTracks?.filter((t) =>
+        config.selectedAudioTrackIndices
+          ? config.selectedAudioTrackIndices.includes(t.typeIndex)
+          : true
+      ) || [];
+    if (selectedTracks.length > 0) {
+      return selectedTracks.reduce((sum, t) => sum + ((t.bitrate || 192) * 1000), 0);
+    }
+    return 192_000 * trackCount;
+  }
+
+  if (config.audioBitrate === 'lossless') return 1_000_000 * trackCount;
+  const parsed = parseBitrateToBps(config.audioBitrate) || 128_000;
+  return parsed * trackCount;
+}
+
+/**
+ * Computes the target video bitrate (in bps) from Target Size MB, explicit Bitrate,
+ * or CRF + resolution + codec efficiency — capped intelligently below source bitrate
+ * so compression reliably reduces file size on both GPU WebCodecs and CPU fallback.
+ */
+export function computeTargetVideoBitrateBps(
+  source: SourceMetadata | null | undefined,
+  config: EncodingConfig
+): number {
+  const duration = source?.duration && source.duration > 0 ? source.duration : 0;
+  const audioBps = parseAudioBitrateBps(config, source);
+
+  // 1. Target Size (MB) mode
+  if (
+    config.compressionPreset === 'target-size' &&
+    config.targetSizeMB &&
+    config.targetSizeMB > 0 &&
+    duration > 0
+  ) {
+    const totalTargetBits = config.targetSizeMB * 8 * 1024 * 1024 * 0.95; // 5% container + margin
+    const availableVideoBits = Math.max(duration * 180_000, totalTargetBits - audioBps * duration);
+    const computedBps = Math.round(availableVideoBits / duration);
+    return Math.min(35_000_000, Math.max(180_000, computedBps));
+  }
+
+  // 2. Explicit constant/average bitrate mode
+  if (config.rateControl === 'bitrate') {
+    const parsed = parseBitrateToBps(config.videoBitrate);
+    if (parsed) {
+      return Math.min(50_000_000, Math.max(180_000, parsed));
+    }
+  }
+
+  // 3. Perceptual CRF-driven bitrate curve for hardware WebCodecs & size estimation
+  const { width, height } = resolveTargetDimensions(
+    source?.width || 1920,
+    source?.height || 1080,
+    config.resolution
+  );
+  const fps =
+    config.framerate !== 'source'
+      ? Math.max(15, Number(config.framerate) || 30)
+      : Math.min(60, Math.max(24, source?.fps || 30));
+
+  // Baseline H.264 CRF 23 ≈ 0.06 bits/pixel-frame (~3.7 Mbps at 1080p30, ~1.65 Mbps at 720p30)
+  const crf = Math.min(34, Math.max(16, config.crf || 23));
+  const crfFactor = Math.pow(2, (23 - crf) / 6);
+  const codecFactor =
+    config.videoCodec === 'libx265'
+      ? 0.68
+      : config.videoCodec === 'libvpx-vp9'
+      ? 0.72
+      : 1.0;
+
+  let estimatedBps = Math.round(width * height * fps * 0.06 * crfFactor * codecFactor);
+
+  // Estimate source video bitrate so compressing an already-compressed clip actually shrinks it
+  let sourceTotalBps = 0;
+  if (source?.bitrate && source.bitrate > 0) {
+    sourceTotalBps = source.bitrate * 1000; // probe.ts stores bitrate in kb/s
+  } else if (source?.size && duration > 0) {
+    sourceTotalBps = Math.round((source.size * 8) / duration);
+  }
+
+  if (sourceTotalBps > 0) {
+    const sourceVideoBps = Math.max(250_000, sourceTotalBps - audioBps);
+    const maxRatio =
+      config.compressionPreset === 'strong' || crf >= 28
+        ? 0.42
+        : config.compressionPreset === 'balanced' || crf >= 23
+        ? 0.62
+        : 0.85;
+    estimatedBps = Math.min(estimatedBps, Math.round(sourceVideoBps * maxRatio));
+  }
+
+  return Math.min(35_000_000, Math.max(220_000, estimatedBps));
+}
+
+/**
+ * Estimates final compressed file size and percentage reduction for live UI preview.
+ */
+export function estimateCompressedSizeBytes(
+  source: SourceMetadata | null | undefined,
+  config: EncodingConfig
+): CompressionEstimate | null {
+  if (!source || !source.size || !source.duration || source.duration <= 0) return null;
+  if (config.targetCategory !== 'video' || config.container === 'gif') return null;
+
+  const targetAudioBps = parseAudioBitrateBps(config, source);
+
+  if (config.videoCodec === 'copy') {
+    return {
+      estimatedBytes: source.size,
+      savingsPercent: 0,
+      targetVideoBps: Math.max(0, Math.round((source.size * 8) / source.duration) - targetAudioBps),
+      targetAudioBps,
+    };
+  }
+
+  const targetVideoBps = computeTargetVideoBitrateBps(source, config);
+  const rawBytes = ((targetVideoBps + targetAudioBps) / 8) * source.duration * 1.03; // 3% mux overhead
+  const estimatedBytes = Math.max(64 * 1024, Math.round(rawBytes));
+  const savingsPercent = Math.round((1 - estimatedBytes / source.size) * 100);
+
+  return {
+    estimatedBytes,
+    savingsPercent,
+    targetVideoBps,
+    targetAudioBps,
+  };
+}
+
+/**
+ * Paged 4 MB block writer for mp4-muxer StreamTarget.
+ * Avoids allocating a single massive contiguous ArrayBuffer on mobile RAM while
+ * supporting random-access header patches (e.g. mdat size fixup at finalize()).
+ */
+class PagedBlobWriter {
+  private readonly pageSize = 4 * 1024 * 1024;
+  private pages: Uint8Array[] = [];
+  private totalSize = 0;
+
+  write(data: Uint8Array, position: number): void {
+    let remaining = data.byteLength;
+    let srcOffset = 0;
+    let dstPos = position;
+
+    while (remaining > 0) {
+      const pageIdx = Math.floor(dstPos / this.pageSize);
+      const pageOffset = dstPos % this.pageSize;
+      while (this.pages.length <= pageIdx) {
+        this.pages.push(new Uint8Array(this.pageSize));
+      }
+      const chunkLen = Math.min(remaining, this.pageSize - pageOffset);
+      this.pages[pageIdx].set(data.subarray(srcOffset, srcOffset + chunkLen), pageOffset);
+      srcOffset += chunkLen;
+      dstPos += chunkLen;
+      remaining -= chunkLen;
+    }
+
+    if (position + data.byteLength > this.totalSize) {
+      this.totalSize = position + data.byteLength;
+    }
+  }
+
+  toBlob(mimeType = 'video/mp4'): Blob {
+    if (this.totalSize === 0) return new Blob([], { type: mimeType });
+    const parts: BlobPart[] = [];
+    let left = this.totalSize;
+    for (let i = 0; i < this.pages.length && left > 0; i++) {
+      const len = Math.min(left, this.pageSize);
+      const page = this.pages[i];
+      parts.push(len === this.pageSize ? page : page.subarray(0, len));
+      left -= len;
+    }
+    const blob = new Blob(parts, { type: mimeType });
+    // Release references to page buffers as soon as Blob wraps them
+    this.pages = [];
+    return blob;
+  }
+}
 
 /**
  * Probe WebGPU and WebCodecs hardware acceleration support
@@ -127,53 +393,50 @@ export async function detectHardwareCapabilities(): Promise<HardwareCapabilities
   };
 
   if (webcodecs.available && typeof VideoEncoder.isConfigSupported === 'function') {
-    // Check H.264 hardware encoding (AVC High Profile)
-    try {
-      const h264Res = await VideoEncoder.isConfigSupported({
-        codec: 'avc1.640033', // High Profile Level 5.1 (supports 4K)
-        width: 1920,
-        height: 1080,
-        bitrate: 5_000_000,
-        framerate: 60,
-        hardwareAcceleration: 'prefer-hardware',
-      });
-      if (h264Res.supported) webcodecs.hwH264 = true;
-    } catch {
-      // Try baseline H.264
+    // Check H.264 hardware encoding across High/Main/Baseline profiles (Desktop, Apple, Snapdragon, MediaTek)
+    for (const h264Profile of ['avc1.640033', 'avc1.64002a', 'avc1.4d0029', 'avc1.42001f']) {
       try {
-        const h264Base = await VideoEncoder.isConfigSupported({
-          codec: 'avc1.42001f',
+        const h264Res = await VideoEncoder.isConfigSupported({
+          codec: h264Profile,
           width: 1280,
           height: 720,
-          bitrate: 2_000_000,
+          bitrate: 2_500_000,
           framerate: 30,
           hardwareAcceleration: 'prefer-hardware',
         });
-        if (h264Base.supported) webcodecs.hwH264 = true;
+        if (h264Res.supported) {
+          webcodecs.hwH264 = true;
+          break;
+        }
       } catch {}
     }
 
-    // Check HEVC (H.265) hardware encoding (Apple Silicon VideoToolbox)
-    try {
-      const hevcRes = await VideoEncoder.isConfigSupported({
-        codec: 'hvc1.1.6.L120.90',
-        width: 1920,
-        height: 1080,
-        bitrate: 5_000_000,
-        framerate: 60,
-        hardwareAcceleration: 'prefer-hardware',
-      });
-      if (hevcRes.supported) webcodecs.hwHEVC = true;
-    } catch {}
+    // Check HEVC (H.265) hardware encoding (Apple VideoToolbox, Snapdragon/MediaTek MediaCodec)
+    for (const hevcProfile of ['hvc1.1.6.L120.90', 'hev1.1.6.L120.90']) {
+      try {
+        const hevcRes = await VideoEncoder.isConfigSupported({
+          codec: hevcProfile,
+          width: 1280,
+          height: 720,
+          bitrate: 2_500_000,
+          framerate: 30,
+          hardwareAcceleration: 'prefer-hardware',
+        });
+        if (hevcRes.supported) {
+          webcodecs.hwHEVC = true;
+          break;
+        }
+      } catch {}
+    }
 
     // Check VP9
     try {
       const vp9Res = await VideoEncoder.isConfigSupported({
         codec: 'vp09.00.10.08',
-        width: 1920,
-        height: 1080,
-        bitrate: 5_000_000,
-        framerate: 60,
+        width: 1280,
+        height: 720,
+        bitrate: 2_500_000,
+        framerate: 30,
         hardwareAcceleration: 'prefer-hardware',
       });
       if (vp9Res.supported) webcodecs.hwVP9 = true;
@@ -183,10 +446,10 @@ export async function detectHardwareCapabilities(): Promise<HardwareCapabilities
     try {
       const av1Res = await VideoEncoder.isConfigSupported({
         codec: 'av01.0.08M.08',
-        width: 1920,
-        height: 1080,
-        bitrate: 5_000_000,
-        framerate: 60,
+        width: 1280,
+        height: 720,
+        bitrate: 2_500_000,
+        framerate: 30,
         hardwareAcceleration: 'prefer-hardware',
       });
       if (av1Res.supported) webcodecs.hwAV1 = true;
@@ -208,21 +471,26 @@ export function getActiveWebGPUDevice(): GPUDevice | null {
 }
 
 /**
- * Transcodes a browser-playable video blob using WebCodecs hardware accelerated pipeline and WebGPU canvas
+ * Compresses/transcodes a browser-playable video blob using WebCodecs hardware-accelerated
+ * VideoEncoder (Snapdragon Adreno / MediaTek MediaCodec / Apple VideoToolbox / GPU NVENC/QSV)
+ * with paged low-RAM MP4 muxing and optional zero-copy fast-start.
  */
 export async function transcodeWithHardwareWebCodecs(
   videoBlob: Blob,
   options: {
+    resolution?: ResolutionPreset;
     targetWidth?: number;
     targetHeight?: number;
-    bitrate?: number; // in bps, e.g. 6_000_000 for 6Mbps
+    bitrate?: number; // in bps, e.g. 2_500_000 for 2.5 Mbps
     framerate?: number;
-    codec?: 'avc1.640033' | 'avc1.4d002a' | 'hvc1.1.6.L120.90';
+    preferredCodec?: 'avc' | 'hevc';
+    codec?: string;
+    fastStart?: boolean;
     webgpuFilter?: 'none' | 'grayscale';
     onProgress?: (progress: { percent: number; currentTime: number; duration: number; fps: number }) => void;
     signal?: AbortSignal;
   }
-): Promise<Blob> {
+): Promise<HardwareEncodeResult> {
   return new Promise((resolve, reject) => {
     const videoUrl = URL.createObjectURL(videoBlob);
     const video = document.createElement('video');
@@ -231,40 +499,88 @@ export async function transcodeWithHardwareWebCodecs(
     video.playsInline = true;
     video.src = videoUrl;
 
+    let activeEncoder: VideoEncoder | null = null;
+    let settled = false;
+
     const cleanup = () => {
+      try {
+        if (activeEncoder && activeEncoder.state !== 'closed') {
+          activeEncoder.close();
+        }
+      } catch {}
+      activeEncoder = null;
       video.pause();
       video.removeAttribute('src');
       video.load();
       URL.revokeObjectURL(videoUrl);
     };
 
-    video.onerror = () => {
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
       cleanup();
-      reject(new Error('Failed to load video element for hardware decoding.'));
+      reject(err);
+    };
+
+    video.onerror = () => {
+      fail(new Error('Failed to load video element for hardware decoding.'));
     };
 
     video.onloadedmetadata = async () => {
       try {
-        const duration = video.duration || 1;
+        const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 1;
         const sourceWidth = video.videoWidth;
         const sourceHeight = video.videoHeight;
 
-        let width = options.targetWidth || sourceWidth;
-        let height = options.targetHeight || sourceHeight;
+        if (!sourceWidth || !sourceHeight) {
+          throw new Error('Source video has invalid dimensions for hardware encoding.');
+        }
 
-        // Even dimensions required for H.264/HEVC
-        width = Math.round(width / 2) * 2;
-        height = Math.round(height / 2) * 2;
+        // Preserve aspect ratio cleanly (portrait or landscape) without stretching
+        let width: number;
+        let height: number;
+        if (options.resolution) {
+          const resolved = resolveTargetDimensions(sourceWidth, sourceHeight, options.resolution);
+          width = resolved.width;
+          height = resolved.height;
+        } else if (options.targetWidth && options.targetHeight) {
+          const isPortrait = sourceHeight > sourceWidth;
+          const maxW = isPortrait
+            ? Math.min(options.targetWidth, options.targetHeight)
+            : Math.max(options.targetWidth, options.targetHeight);
+          const maxH = isPortrait
+            ? Math.max(options.targetWidth, options.targetHeight)
+            : Math.min(options.targetWidth, options.targetHeight);
+          if (sourceWidth <= maxW && sourceHeight <= maxH) {
+            width = Math.max(2, Math.round(sourceWidth / 2) * 2);
+            height = Math.max(2, Math.round(sourceHeight / 2) * 2);
+          } else {
+            const scale = Math.min(maxW / sourceWidth, maxH / sourceHeight);
+            width = Math.max(2, Math.round((sourceWidth * scale) / 2) * 2);
+            height = Math.max(2, Math.round((sourceHeight * scale) / 2) * 2);
+          }
+        } else {
+          width = Math.max(2, Math.round(sourceWidth / 2) * 2);
+          height = Math.max(2, Math.round(sourceHeight / 2) * 2);
+        }
 
-        const framerate = options.framerate || 30;
-        const bitrate = options.bitrate || Math.min(25_000_000, Math.round(width * height * framerate * 0.1));
+        const framerate = Math.min(60, Math.max(15, options.framerate || 30));
+        const bitrate = Math.min(
+          35_000_000,
+          Math.max(180_000, options.bitrate || Math.round(width * height * framerate * 0.06))
+        );
 
-        // Pick the highest H.264/HEVC hardware profile accepted by Snapdragon/MediaTek/Apple MediaCodec
+        // Pick the highest H.265/HEVC or H.264 hardware profile accepted by Snapdragon/MediaTek/Apple/Desktop GPU
+        const h264Candidates = ['avc1.640033', 'avc1.64002a', 'avc1.4d0029', 'avc1.42001f'];
+        const hevcCandidates = ['hvc1.1.6.L120.90', 'hev1.1.6.L120.90'];
+
         const candidateCodecs: string[] = options.codec
-          ? [options.codec]
-          : ['avc1.640033', 'avc1.64002a', 'avc1.4d0029', 'avc1.42001f'];
+          ? [options.codec, ...h264Candidates]
+          : options.preferredCodec === 'hevc'
+          ? [...hevcCandidates, ...h264Candidates]
+          : h264Candidates;
 
-        let selectedCodec = candidateCodecs[0];
+        let selectedCodec: string | null = null;
         if (typeof VideoEncoder.isConfigSupported === 'function') {
           for (const candidate of candidateCodecs) {
             try {
@@ -282,17 +598,33 @@ export async function transcodeWithHardwareWebCodecs(
               }
             } catch {}
           }
+        } else {
+          selectedCodec = candidateCodecs[0];
         }
 
-        // Setup MP4 Muxer with ArrayBufferTarget
+        if (!selectedCodec) {
+          throw new Error('No supported hardware VideoEncoder profile found for target resolution/codec.');
+        }
+
+        const isHevc = selectedCodec.startsWith('hvc1') || selectedCodec.startsWith('hev1');
+
+        // Paged 4 MB StreamTarget keeps peak RAM low on Snapdragon/MediaTek phones
+        const pagedWriter = new PagedBlobWriter();
         const muxer = new Muxer({
-          target: new ArrayBufferTarget(),
+          target: new StreamTarget({
+            onData: (data, position) => {
+              pagedWriter.write(data, position);
+            },
+            chunked: true,
+            chunkSize: 4 * 1024 * 1024,
+          }),
           video: {
-            codec: selectedCodec.startsWith('hvc1') ? 'hevc' : 'avc',
+            codec: isHevc ? 'hevc' : 'avc',
             width,
             height,
+            frameRate: framerate,
           },
-          fastStart: 'in-memory',
+          fastStart: false,
         });
 
         // Initialize WebCodecs VideoEncoder
@@ -306,10 +638,10 @@ export async function transcodeWithHardwareWebCodecs(
           error: (err) => {
             console.error('WebCodecs VideoEncoder error:', err);
             encoderFailed = true;
-            cleanup();
-            reject(err);
+            fail(err instanceof Error ? err : new Error(String(err)));
           },
         });
+        activeEncoder = encoder;
 
         encoder.configure({
           codec: selectedCodec,
@@ -317,11 +649,12 @@ export async function transcodeWithHardwareWebCodecs(
           height,
           bitrate,
           framerate,
+          bitrateMode: 'variable',
           hardwareAcceleration: 'prefer-hardware',
           latencyMode: 'quality',
         });
 
-        // Only allocate 2D canvas if resizing is needed; otherwise capture VideoFrame directly from GPU decoder (zero-copy!)
+        // Zero-copy GPU VideoFrame path when dimensions match and no canvas filter is active
         const canDirectZeroCopyFrame =
           width === sourceWidth && height === sourceHeight && options.webgpuFilter !== 'grayscale';
 
@@ -335,23 +668,54 @@ export async function transcodeWithHardwareWebCodecs(
           if (!ctx) {
             throw new Error('Failed to initialize 2D rendering context for hardware frame scaling.');
           }
+          if (options.webgpuFilter === 'grayscale') {
+            ctx.filter = 'grayscale(100%)';
+          }
         }
 
-        const totalSteps = Math.ceil(duration * framerate);
+        const totalSteps = Math.max(1, Math.ceil(duration * framerate));
         const timeInterval = 1 / framerate;
 
         let frameIndex = 0;
         const startTime = Date.now();
         let lastProgressAt = 0;
 
-        const stepThrough = async () => {
-          if (options.signal?.aborted) {
-            cleanup();
-            reject(new Error('Hardware transcode cancelled by user.'));
-            return;
+        const finalizeEncode = async () => {
+          if (settled || encoderFailed) return;
+          await encoder.flush();
+          muxer.finalize();
+
+          let finalBlob = pagedWriter.toBlob('video/mp4');
+          if (options.fastStart) {
+            try {
+              const fastResult = await relocateMoovToFrontZeroCopy(finalBlob);
+              finalBlob = fastResult.blob;
+            } catch {
+              // Keep non-faststart MP4 if relocation was unnecessary
+            }
           }
 
-          if (encoderFailed) return;
+          if (!settled) {
+            settled = true;
+            cleanup();
+            resolve({
+              blob: finalBlob,
+              codecUsed: selectedCodec!,
+              isHevc,
+              width,
+              height,
+              bitrateBps: bitrate,
+            });
+          }
+        };
+
+        const stepThrough = async () => {
+          if (settled || encoderFailed) return;
+
+          if (options.signal?.aborted) {
+            fail(new Error('Hardware compression cancelled by user.'));
+            return;
+          }
 
           // Respect hardware encoder queue backpressure without artificial 60fps display VSync cap
           if (encoder.encodeQueueSize > 6) {
@@ -361,25 +725,54 @@ export async function transcodeWithHardwareWebCodecs(
 
           const targetTime = frameIndex * timeInterval;
           if (targetTime >= duration || frameIndex >= totalSteps) {
-            await encoder.flush();
-            muxer.finalize();
-
-            const buffer = muxer.target.buffer;
-            const finalBlob = new Blob([buffer], { type: 'video/mp4' });
-            cleanup();
-            resolve(finalBlob);
+            try {
+              await finalizeEncode();
+            } catch (flushErr: any) {
+              fail(flushErr instanceof Error ? flushErr : new Error(String(flushErr)));
+            }
             return;
           }
 
-          // Seek video to frame timestamp
-          video.currentTime = targetTime;
-          await new Promise<void>((r) => {
+          // Seek video to frame timestamp with timeout safeguard against unseekable EOF frames
+          const seekOk = await new Promise<boolean>((r) => {
+            let done = false;
+            const timer = setTimeout(() => {
+              if (!done) {
+                done = true;
+                video.removeEventListener('seeked', onSeeked);
+                r(false);
+              }
+            }, 2500);
             const onSeeked = () => {
-              video.removeEventListener('seeked', onSeeked);
-              r();
+              if (!done) {
+                done = true;
+                clearTimeout(timer);
+                video.removeEventListener('seeked', onSeeked);
+                r(true);
+              }
             };
             video.addEventListener('seeked', onSeeked);
+            video.currentTime = Math.min(targetTime, Math.max(0, duration - 0.001));
           });
+
+          if (!seekOk) {
+            // If we already encoded frames and hit an unseekable tail, finalize cleanly
+            if (encodedFramesCount > 0) {
+              try {
+                await finalizeEncode();
+              } catch (flushErr: any) {
+                fail(flushErr instanceof Error ? flushErr : new Error(String(flushErr)));
+              }
+              return;
+            }
+            fail(new Error('Hardware decoder could not seek source video container.'));
+            return;
+          }
+
+          if (settled || encoderFailed || options.signal?.aborted) {
+            if (options.signal?.aborted) fail(new Error('Hardware compression cancelled by user.'));
+            return;
+          }
 
           const timestampMicros = Math.round(targetTime * 1_000_000);
           const durationMicros = Math.round(timeInterval * 1_000_000);
@@ -429,8 +822,7 @@ export async function transcodeWithHardwareWebCodecs(
 
         stepThrough();
       } catch (err) {
-        cleanup();
-        reject(err);
+        fail(err instanceof Error ? err : new Error(String(err)));
       }
     };
   });

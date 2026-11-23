@@ -44,6 +44,7 @@ import {
 import {
   detectHardwareCapabilities,
   transcodeWithHardwareWebCodecs,
+  computeTargetVideoBitrateBps,
   HardwareCapabilities,
 } from './utils/hardwareEngine';
 import {
@@ -901,19 +902,23 @@ export default function App() {
 
       // Pipeline selection:
       const devCaps = detectDeviceCapabilities();
-      const hwMaxBytes = devCaps.isAndroid ? 250 * 1024 * 1024 : 400 * 1024 * 1024;
+      // Paged 4 MB StreamTarget allows large mobile files to compress safely in hardware GPU mode
+      const hwMaxBytes = devCaps.isAndroid ? 600 * 1024 * 1024 : 1500 * 1024 * 1024;
       const isVideoTarget = config.targetCategory === 'video' && config.container !== 'gif';
       const isCopy = isVideoTarget && config.videoCodec === 'copy';
-      const isTargetMp4 = config.container === 'mp4';
-      // Disable WebCodecs whole-buffer demuxing for large files so mobile devices always use streaming WORKERFS + OPFS/Paged FS
+      const isHwContainer = config.container === 'mp4' || config.container === 'mov';
       const canHardwareWebCodecs =
         rawFile.size <= hwMaxBytes &&
         isVideoTarget &&
         !isCopy &&
+        isHwContainer &&
         config.hardwareAcceleration !== false &&
-        (config.hardwareEngine === 'webgpu' || config.webgpuFilter === 'grayscale') &&
-        isTargetMp4 &&
-        (hardwareCaps?.webcodecs.hwH264 || hardwareCaps?.webcodecs.available);
+        config.hardwareEngine !== 'cpu' &&
+        Boolean(
+          hardwareCaps?.webcodecs.hwH264 ||
+            hardwareCaps?.webcodecs.hwHEVC ||
+            hardwareCaps?.webcodecs.available
+        );
 
       let outputBlob: Blob | null = null;
       let executedCommand: string[] = [];
@@ -1067,20 +1072,43 @@ export default function App() {
         const mimeType = getMimeType(config.container);
         outputBlob = await readOutputAsBlob(virtualOut, mimeType, useZeroCopyFastStart);
       } else if (canHardwareWebCodecs) {
-        // WEBGPU & WEBCODECS HARDWARE ACCELERATION
+        // HARDWARE GPU VIDEO COMPRESSION (WebCodecs VideoEncoder + prefer-hardware)
+        const preferredHwCodec: 'avc' | 'hevc' =
+          config.videoCodec === 'libx265' ? 'hevc' : 'avc';
+        const gpuEngineLabel = devCaps.isAndroid
+          ? `Hardware GPU (${devCaps.chipLabel})`
+          : hardwareCaps?.webgpu.description &&
+            hardwareCaps.webgpu.description !== 'WebGPU Not Supported'
+          ? `Hardware GPU (${hardwareCaps.webgpu.description})`
+          : 'Hardware GPU Media Engine';
+
         setTelemetry((prev) => ({
           ...prev,
-          accelerationMode: devCaps.isAndroid
-            ? `Hardware GPU (${devCaps.chipLabel})`
-            : 'Hardware GPU Media Engine',
+          accelerationMode: gpuEngineLabel,
         }));
-        addLog('system', 'Initializing hardware GPU video pipeline...');
+        addLog('system', `Initializing hardware GPU compression pipeline (${gpuEngineLabel})...`);
 
         let sourceBlobForHw: Blob = rawFile;
-        if (extIn.toLowerCase() === '.mkv' || extIn.toLowerCase() === '.avi') {
+        const lowerExtIn = extIn.toLowerCase();
+        if (['.mkv', '.avi', '.flv', '.ts', '.m2ts', '.mts'].includes(lowerExtIn)) {
           addLog('system', 'Pre-flight stream remuxing for hardware video decoder...');
           const tempRemuxOut = `temp_hw_remux_${Date.now()}.mp4`;
-          const remuxArgs = ['-hide_banner', '-nostdin', '-threads', '1', '-i', virtualIn, '-c:v', 'copy', '-an', tempRemuxOut];
+          const remuxArgs = [
+            '-hide_banner',
+            '-nostdin',
+            '-threads',
+            '1',
+            '-fflags',
+            '+genpts',
+            '-i',
+            virtualIn,
+            '-c:v',
+            'copy',
+            '-an',
+            '-sn',
+            '-dn',
+            tempRemuxOut,
+          ];
           const remuxCode = await ffmpeg.exec(remuxArgs);
           if (remuxCode === 0) {
             sourceBlobForHw = await readOutputAsBlob(tempRemuxOut, 'video/mp4', true);
@@ -1090,98 +1118,224 @@ export default function App() {
 
         try {
           hwAbortController.current = new AbortController();
-          let targetWidth: number | undefined;
-          let targetHeight: number | undefined;
-          if (config.resolution !== 'source') {
-            const [w, h] = config.resolution.split('x').map(Number);
-            targetWidth = w;
-            targetHeight = h;
-          }
-          let bitrateBps: number | undefined;
-          if (config.videoBitrate) {
-            bitrateBps = parseInt(config.videoBitrate, 10) * 1000;
-          }
+          const bitrateBps = computeTargetVideoBitrateBps(effectiveMeta, config);
+          const targetFramerate =
+            config.framerate !== 'source'
+              ? Number(config.framerate)
+              : effectiveMeta.fps && effectiveMeta.fps >= 15 && effectiveMeta.fps <= 60
+              ? Math.round(effectiveMeta.fps)
+              : 30;
 
-          const hwVideoBlob = await transcodeWithHardwareWebCodecs(sourceBlobForHw, {
-            targetWidth,
-            targetHeight,
+          // Determine selected audio and text subtitle tracks to mux after hardware video compression
+          const probedAudioSet = new Set((effectiveMeta.audioTracks || []).map((a) => a.typeIndex));
+          const rawAudioIndices =
+            config.audioCodec === 'none' || !effectiveMeta.hasAudio
+              ? []
+              : config.selectedAudioTrackIndices !== undefined
+              ? config.selectedAudioTrackIndices
+              : effectiveMeta.audioTracks && effectiveMeta.audioTracks.length > 0
+              ? effectiveMeta.audioTracks.map((a) => a.typeIndex)
+              : [0];
+          const validAudioIndices =
+            probedAudioSet.size > 0
+              ? rawAudioIndices.filter((idx) => probedAudioSet.has(idx))
+              : rawAudioIndices;
+
+          const validTextSubtitles =
+            config.subtitleMode === 'drop'
+              ? []
+              : (effectiveMeta.subtitleTracks || []).filter((s) => {
+                  if (s.formatType !== 'text') return false;
+                  if (config.selectedSubtitleTrackIndices !== undefined) {
+                    return config.selectedSubtitleTrackIndices.includes(s.typeIndex);
+                  }
+                  return true;
+                });
+
+          const needsFinalMux =
+            validAudioIndices.length > 0 ||
+            validTextSubtitles.length > 0 ||
+            config.container === 'mov';
+
+          addLog(
+            'system',
+            `Hardware GPU target: ${config.resolution === 'source' ? 'Original resolution' : config.resolution} @ ${(
+              bitrateBps / 1_000_000
+            ).toFixed(2)} Mbps (${preferredHwCodec === 'hevc' ? 'HEVC / H.265' : 'H.264 / AVC'}, ${targetFramerate} fps).`
+          );
+
+          const hwResult = await transcodeWithHardwareWebCodecs(sourceBlobForHw, {
+            resolution: config.resolution,
             bitrate: bitrateBps,
-            framerate: config.framerate !== 'source' ? Number(config.framerate) : undefined,
+            framerate: targetFramerate,
+            preferredCodec: preferredHwCodec,
+            fastStart: !needsFinalMux && useZeroCopyFastStart,
             webgpuFilter: config.webgpuFilter,
             signal: hwAbortController.current.signal,
             onProgress: (p) => {
               const now = Date.now();
               const elapsed = now - startTimeRef.current;
-              const remainingSec = p.percent > 1 ? ((elapsed / (p.percent / 100)) - elapsed) / 1000 : null;
+              const remainingSec =
+                p.percent > 1 ? (elapsed / (p.percent / 100) - elapsed) / 1000 : null;
               setTelemetry({
-                percent: p.percent,
+                percent: needsFinalMux ? Math.min(94, p.percent * 0.94) : p.percent,
                 currentTime: p.currentTime,
                 duration: p.duration,
                 fps: p.fps,
-                speed: `${p.fps} fps (Hardware)`,
+                speed: `${p.fps} fps (GPU)`,
                 elapsedMs: elapsed,
-                etaSeconds: remainingSec !== null ? Math.max(0, Math.round(remainingSec)) : null,
-                accelerationMode: devCaps.isAndroid
-                  ? `Hardware GPU (${devCaps.chipLabel})`
-                  : 'Hardware GPU Media Engine',
+                etaSeconds:
+                  remainingSec !== null ? Math.max(0, Math.round(remainingSec)) : null,
+                accelerationMode: gpuEngineLabel,
               });
             },
           });
 
-          // If source has audio and user didn't mute audio, mux audio from virtualIn into hardware video via WORKERFS
-          if (effectiveMeta.hasAudio && config.audioCodec !== 'none') {
-            addLog('system', 'Muxing audio stream into hardware-encoded MP4 container...');
+          const mimeType = getMimeType(config.container);
+
+          if (needsFinalMux) {
+            addLog(
+              'system',
+              `Muxing compressed ${hwResult.isHevc ? 'HEVC' : 'H.264'} video with ${validAudioIndices.length} audio & ${validTextSubtitles.length} subtitle track(s) into .${config.container.toUpperCase()}...`
+            );
             const hwMountDir = `/hw_mnt_${Date.now()}`;
             const hwVideoName = `hw_video_${Date.now()}.mp4`;
             const hwVirtualPath = `${hwMountDir}/${hwVideoName}`;
             await ffmpeg.createDir(hwMountDir);
             await ffmpeg.mount(
               'WORKERFS' as any,
-              { blobs: [{ name: hwVideoName, data: hwVideoBlob }] },
+              { blobs: [{ name: hwVideoName, data: hwResult.blob }] },
               hwMountDir
             );
-            try {
-              const muxArgs = [
+
+            const buildHwMuxArgs = (includeSubtitles: boolean): string[] => {
+              const args: string[] = [
                 '-hide_banner',
                 '-nostdin',
-                '-threads', '1',
-                '-i', hwVirtualPath,
-                '-i', virtualIn,
-                '-map', '0:v:0',
-                '-map', '1:a:0?',
-                '-c:v', 'copy',
-                '-c:a', 'aac',
-                '-b:a', config.audioBitrate === 'lossless' ? '256k' : config.audioBitrate,
-                '-shortest',
-                virtualOut,
+                '-threads',
+                '1',
+                '-i',
+                hwVirtualPath,
+                '-i',
+                virtualIn,
+                '-map',
+                '0:v:0',
               ];
-              const muxCode = await ffmpeg.exec(muxArgs);
-              if (muxCode === 0) {
-                outputBlob = await readOutputAsBlob(virtualOut, 'video/mp4', useZeroCopyFastStart);
+
+              for (const aIdx of validAudioIndices) {
+                args.push('-map', `1:a:${aIdx}?`);
+              }
+
+              if (includeSubtitles && validTextSubtitles.length > 0) {
+                for (const sTrack of validTextSubtitles) {
+                  args.push('-map', `1:s:${sTrack.typeIndex}`);
+                }
+              }
+
+              args.push('-c:v', 'copy');
+              if (hwResult.isHevc) {
+                args.push('-tag:v', 'hvc1');
+              }
+
+              if (validAudioIndices.length === 0) {
+                args.push('-an');
+              } else if (config.audioCodec === 'copy') {
+                const selectedAudioObjs =
+                  effectiveMeta.audioTracks?.filter((a) =>
+                    validAudioIndices.includes(a.typeIndex)
+                  ) || [];
+                const allCompatible =
+                  selectedAudioObjs.length > 0 &&
+                  selectedAudioObjs.every((a) => a.isMp4Compatible);
+                if (allCompatible) {
+                  args.push('-c:a', 'copy');
+                } else {
+                  args.push(
+                    '-c:a',
+                    'aac',
+                    '-b:a',
+                    config.audioBitrate === 'lossless' ? '192k' : config.audioBitrate
+                  );
+                }
               } else {
-                outputBlob = hwVideoBlob;
+                const safeAudioCodec =
+                  config.audioCodec === 'aac' || config.audioCodec === 'libmp3lame'
+                    ? config.audioCodec
+                    : 'aac';
+                args.push(
+                  '-c:a',
+                  safeAudioCodec,
+                  '-b:a',
+                  config.audioBitrate === 'lossless' ? '192k' : config.audioBitrate
+                );
+                if (config.audioChannels === 'mono') args.push('-ac', '1');
+                else if (config.audioChannels === 'stereo') args.push('-ac', '2');
+                else if (config.audioChannels === '5.1') args.push('-ac', '6');
+                if (config.audioSampleRate !== 'source') args.push('-ar', config.audioSampleRate);
+              }
+
+              if (includeSubtitles && validTextSubtitles.length > 0) {
+                args.push('-c:s', 'mov_text');
+              } else {
+                args.push('-sn');
+              }
+
+              args.push('-dn', '-avoid_negative_ts', 'make_zero', '-max_muxing_queue_size', '4096', '-shortest', virtualOut);
+              return args;
+            };
+
+            try {
+              let muxCode = await ffmpeg.exec(buildHwMuxArgs(true));
+              if (muxCode !== 0 && validTextSubtitles.length > 0) {
+                try { await ffmpeg.deleteFile(virtualOut); } catch {}
+                addLog('system', 'Retrying hardware video + audio mux without incompatible subtitles...');
+                muxCode = await ffmpeg.exec(buildHwMuxArgs(false));
+              }
+              if (muxCode === 0) {
+                outputBlob = await readOutputAsBlob(virtualOut, mimeType, useZeroCopyFastStart);
+              } else {
+                outputBlob = hwResult.blob;
               }
             } finally {
               try { await ffmpeg.unmount(hwMountDir); } catch {}
               try { await ffmpeg.deleteDir(hwMountDir); } catch {}
             }
           } else {
-            outputBlob = hwVideoBlob;
+            outputBlob = hwResult.blob;
           }
 
           executedCommand = [
-            'webcodecs',
+            'webcodecs-gpu',
+            `--codec=${hwResult.codecUsed}`,
+            `--resolution=${hwResult.width}x${hwResult.height}`,
+            `--bitrate=${Math.round(hwResult.bitrateBps / 1000)}k`,
             '--hardware-acceleration=prefer-hardware',
-            `--width=${targetWidth || 'source'}`,
-            `--bitrate=${bitrateBps || 'auto'}`
           ];
-          addLog('system', 'Hardware WebCodecs encode completed via GPU media engine.');
+          addLog(
+            'system',
+            `Hardware GPU compression finished (${hwResult.codecUsed}, ${hwResult.width}x${hwResult.height}, ${(
+              hwResult.bitrateBps / 1_000_000
+            ).toFixed(2)} Mbps).`
+          );
         } catch (hwErr: any) {
           if (hwAbortController.current?.signal.aborted) {
             throw hwErr;
           }
-          addLog('system', `Hardware encoder fallback (${hwErr?.message || 'hardware unavailable'}). Switching to CPU encoder.`);
-          executedCommand = buildFFmpegArgs(virtualIn, virtualOut, config, effectiveMeta, execBuildOptions);
+          addLog(
+            'system',
+            `Hardware GPU encoder fallback (${hwErr?.message || 'hardware unavailable'}). Switching to CPU Wasm encoder.`
+          );
+          setTelemetry((prev) => ({
+            ...prev,
+            accelerationMode: 'CPU Wasm Fallback',
+          }));
+          executedCommand = buildFFmpegArgs(
+            virtualIn,
+            virtualOut,
+            config,
+            effectiveMeta,
+            execBuildOptions
+          );
           addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
           const returnCode = await ffmpeg.exec(executedCommand);
           if (returnCode !== 0) {
@@ -1281,7 +1435,12 @@ export default function App() {
       setIsPurged(false);
 
       const baseName = sourceMeta.name.replace(/\.[^/.]+$/, '');
-      const finalOutputName = `${baseName}_converted${extOut}`;
+      const outputSuffix = isCopy
+        ? '_remuxed'
+        : isVideoTarget
+        ? '_compressed'
+        : '_converted';
+      const finalOutputName = `${baseName}${outputSuffix}${extOut}`;
       const elapsed = Date.now() - startTimeRef.current;
 
       setResult({
@@ -1492,9 +1651,18 @@ export default function App() {
                               </span>
                             </div>
                             <div className="text-xs text-zinc-400 font-mono mt-0.5">
-                              {config.videoCodec === 'copy' && config.audioCodec === 'copy'
-                                ? 'Direct copy (no re-encoding)'
-                                : `Re-encode (${config.speedPreset})`}
+                              {config.targetCategory === 'video' && config.container !== 'gif'
+                                ? config.videoCodec === 'copy'
+                                  ? 'Remux (Direct stream copy)'
+                                  : config.hardwareAcceleration !== false &&
+                                    config.hardwareEngine !== 'cpu' &&
+                                    (config.container === 'mp4' || config.container === 'mov') &&
+                                    (hardwareCaps?.webcodecs.hwH264 ||
+                                      hardwareCaps?.webcodecs.hwHEVC ||
+                                      hardwareCaps?.webcodecs.available)
+                                  ? `Compress (Hardware GPU • ${config.videoCodec === 'libx265' ? 'HEVC' : 'H.264'})`
+                                  : `Compress (CPU • ${config.speedPreset})`
+                                : `Convert to .${config.container.toUpperCase()}`}
                             </div>
                           </div>
                         </div>
@@ -1510,7 +1678,13 @@ export default function App() {
                               <span>Loading...</span>
                             </>
                           ) : (
-                            <span>Convert to .{config.container.toUpperCase()}</span>
+                            <span>
+                              {config.targetCategory === 'video' && config.container !== 'gif'
+                                ? config.videoCodec === 'copy'
+                                  ? `Remux to .${config.container.toUpperCase()}`
+                                  : `Compress to .${config.container.toUpperCase()}`
+                                : `Convert to .${config.container.toUpperCase()}`}
+                            </span>
                           )}
                         </button>
                       </div>
@@ -1598,14 +1772,20 @@ export default function App() {
                             </span>
                           </div>
                           <div className="text-xs text-zinc-400 font-mono mt-0.5">
-                            {config.videoCodec === 'copy' && config.audioCodec === 'copy'
-                              ? 'Direct copy (no re-encoding)'
-                              : config.videoCodec === 'copy'
-                              ? 'Video copy + audio convert'
-                              : config.hardwareAcceleration !== false &&
-                                (hardwareCaps?.webcodecs.hwH264 || hardwareCaps?.webcodecs.available)
-                              ? 'Hardware encode'
-                              : `Re-encode (${config.speedPreset})`}
+                            {config.targetCategory === 'video' && config.container !== 'gif'
+                              ? config.videoCodec === 'copy' && config.audioCodec === 'copy'
+                                ? 'Remux (Direct copy, no re-encoding)'
+                                : config.videoCodec === 'copy'
+                                ? 'Remux (Video copy + audio convert)'
+                                : config.hardwareAcceleration !== false &&
+                                  config.hardwareEngine !== 'cpu' &&
+                                  (config.container === 'mp4' || config.container === 'mov') &&
+                                  (hardwareCaps?.webcodecs.hwH264 ||
+                                    hardwareCaps?.webcodecs.hwHEVC ||
+                                    hardwareCaps?.webcodecs.available)
+                                ? `Compress (Hardware GPU • ${config.videoCodec === 'libx265' ? 'HEVC' : 'H.264'})`
+                                : `Compress (CPU • ${config.speedPreset})`
+                              : `Convert to .${config.container.toUpperCase()}`}
                           </div>
                         </div>
                       </div>
@@ -1613,7 +1793,7 @@ export default function App() {
                       <button
                         onClick={handleStartConversion}
                         disabled={!rawFile || isConverting || engineLoading}
-                        aria-label={`Convert media file to ${config.container.toUpperCase()}`}
+                        aria-label={`Process media file to ${config.container.toUpperCase()}`}
                         className="cyber-btn-primary w-full sm:w-auto px-8 py-3.5 rounded-xl text-sm tracking-wide transition-all flex items-center justify-center gap-2.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed hover:scale-[1.02] active:scale-[0.98] focus:outline-none"
                       >
                         {engineLoading ? (
@@ -1622,7 +1802,13 @@ export default function App() {
                             <span>Loading...</span>
                           </>
                         ) : (
-                          <span>Convert to .{config.container.toUpperCase()}</span>
+                          <span>
+                            {config.targetCategory === 'video' && config.container !== 'gif'
+                              ? config.videoCodec === 'copy'
+                                ? `Remux to .${config.container.toUpperCase()}`
+                                : `Compress to .${config.container.toUpperCase()}`
+                              : `Convert to .${config.container.toUpperCase()}`}
+                          </span>
                         )}
                       </button>
                     </div>
