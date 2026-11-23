@@ -54,7 +54,7 @@ export const ArchiveDecompressor: React.FC = () => {
     setError(null);
     setIsDecompressing(true);
     setProgressPercent(0);
-    setProgressStatus('Reading archive payload...');
+    setProgressStatus('Reading archive...');
 
     try {
       const res = await decompressArchive(
@@ -211,7 +211,7 @@ export const ArchiveDecompressor: React.FC = () => {
             Drop archive here or browse
           </h3>
           <p className="mt-1 text-xs text-zinc-400">
-            Extract RAR 5.0, 7Z, ZIP, TAR.GZ, TAR, or GZ (100% Offline)
+            RAR, 7Z, ZIP, TAR.GZ, TAR, or GZ
           </p>
 
           <div className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold text-xs transition-colors shadow-md">
@@ -287,13 +287,13 @@ export const ArchiveDecompressor: React.FC = () => {
         <div className="p-4 rounded-xl bg-red-950/40 border border-red-800 text-red-200 text-xs flex items-start gap-3">
           <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
           <div className="flex-1">
-            <p className="font-semibold text-red-400 text-sm">Decompression Error</p>
+            <p className="font-semibold text-red-400 text-sm">Extraction Error</p>
             <p className="mt-1">{error}</p>
             <button
               onClick={() => fileInputRef.current?.click()}
-              className="mt-2.5 px-3 py-1 rounded bg-red-900 hover:bg-red-800 text-red-100 text-xs border border-red-700 transition-colors"
+              className="mt-2.5 px-3 py-1 rounded bg-red-900 hover:bg-red-800 text-red-100 text-xs border border-red-700 transition-colors cursor-pointer"
             >
-              Choose Another Archive
+              Choose Another File
             </button>
           </div>
         </div>
@@ -375,12 +375,12 @@ export const ArchiveDecompressor: React.FC = () => {
               {/* Category Pills */}
               <div className="flex items-center gap-1.5 overflow-x-auto w-full sm:w-auto pb-1 sm:pb-0">
                 {[
-                  { id: 'all', label: 'All Files' },
+                  { id: 'all', label: 'All' },
                   { id: 'image', label: 'Images' },
                   { id: 'video', label: 'Videos' },
                   { id: 'audio', label: 'Audio' },
-                  { id: 'text', label: 'Text & Docs' },
-                  { id: 'other', label: 'Binaries' },
+                  { id: 'text', label: 'Docs' },
+                  { id: 'other', label: 'Other' },
                 ].map((tab) => (
                   <button
                     key={tab.id}

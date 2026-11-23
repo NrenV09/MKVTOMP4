@@ -279,7 +279,7 @@ export const ArchiveCompressor: React.FC = () => {
             Drop files here or browse
           </h3>
           <p className="mt-1 text-xs text-zinc-400">
-            Compress into RAR 5.0, 7Z, ZIP, TAR.GZ, TAR, or GZ (100% Offline)
+            RAR, 7Z, ZIP, TAR.GZ, TAR, or GZ
           </p>
 
           <div className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold text-xs transition-colors shadow-md">
@@ -427,97 +427,113 @@ export const ArchiveCompressor: React.FC = () => {
               </div>
             </div>
 
-            {/* Settings Row */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              {/* Method */}
-              <div>
-                <label className="block text-xs font-semibold text-zinc-300 mb-1.5">
-                  Method
-                </label>
-                <select
-                  value={compressionMethod}
-                  onChange={(e) => setCompressionMethod(e.target.value as WinRarCompressionMethod)}
-                  className="w-full px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-xs text-zinc-200 focus:outline-none focus:border-emerald-500"
-                >
-                  <option value="store">Store</option>
-                  <option value="fast">Fast</option>
-                  <option value="normal">Normal</option>
-                  <option value="best">Best</option>
-                </select>
-              </div>
+            {/* Settings Row (only show options supported by the selected format) */}
+            {format !== 'tar' && (
+              <div
+                className={`grid grid-cols-1 gap-3 ${
+                  format === 'rar' || format === '7z' || format === 'zip'
+                    ? 'sm:grid-cols-3'
+                    : 'sm:grid-cols-1'
+                }`}
+              >
+                {/* Method */}
+                <div>
+                  <label className="block text-xs font-semibold text-zinc-300 mb-1.5">
+                    Compression
+                  </label>
+                  <select
+                    value={compressionMethod}
+                    onChange={(e) => setCompressionMethod(e.target.value as WinRarCompressionMethod)}
+                    className="w-full px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-xs text-zinc-200 focus:outline-none focus:border-emerald-500"
+                  >
+                    <option value="store">Store</option>
+                    <option value="fast">Fast</option>
+                    <option value="normal">Normal</option>
+                    <option value="best">Best</option>
+                  </select>
+                </div>
 
-              {/* Volumes */}
-              <div>
-                <label className="block text-xs font-semibold text-zinc-300 mb-1.5">
-                  Split Volumes
-                </label>
-                <select
-                  value={splitVolume}
-                  onChange={(e) => setSplitVolume(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-xs text-zinc-200 focus:outline-none focus:border-emerald-500"
-                >
-                  <option value="none">None</option>
-                  <option value="10m">10 MB</option>
-                  <option value="25m">25 MB</option>
-                  <option value="100m">100 MB</option>
-                  <option value="700m">700 MB</option>
-                  <option value="4481m">4.4 GB</option>
-                </select>
-              </div>
-
-              {/* Password */}
-              <div>
-                <label className="block text-xs font-semibold text-zinc-300 mb-1.5">
-                  Encryption
-                </label>
-                <button
-                  type="button"
-                  onClick={() => setShowPasswordModal(true)}
-                  className={`w-full px-3 py-2 rounded-xl border text-xs font-medium flex items-center justify-between transition-colors cursor-pointer ${
-                    password
-                      ? 'bg-amber-950/30 border-amber-500/50 text-amber-300'
-                      : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/80'
-                  }`}
-                >
-                  <span className="flex items-center gap-1.5 truncate">
-                    <Lock className="w-3.5 h-3.5" />
-                    <span>{password ? 'Password Set' : 'Set Password'}</span>
-                  </span>
-                  {password && (
-                    <span
-                      onClick={handleClearPassword}
-                      className="p-0.5 hover:text-red-400 transition-colors"
-                      title="Remove password"
+                {/* Volumes (RAR / 7Z / ZIP) */}
+                {(format === 'rar' || format === '7z' || format === 'zip') && (
+                  <div>
+                    <label className="block text-xs font-semibold text-zinc-300 mb-1.5">
+                      Split Size
+                    </label>
+                    <select
+                      value={splitVolume}
+                      onChange={(e) => setSplitVolume(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-xs text-zinc-200 focus:outline-none focus:border-emerald-500"
                     >
-                      <X className="w-3 h-3" />
-                    </span>
-                  )}
-                </button>
+                      <option value="none">Single file</option>
+                      <option value="10m">10 MB</option>
+                      <option value="25m">25 MB</option>
+                      <option value="100m">100 MB</option>
+                      <option value="700m">700 MB</option>
+                      <option value="4481m">4.4 GB</option>
+                    </select>
+                  </div>
+                )}
+
+                {/* Password (RAR / 7Z / ZIP) */}
+                {(format === 'rar' || format === '7z' || format === 'zip') && (
+                  <div>
+                    <label className="block text-xs font-semibold text-zinc-300 mb-1.5">
+                      Password
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setShowPasswordModal(true)}
+                      className={`w-full px-3 py-2 rounded-xl border text-xs font-medium flex items-center justify-between transition-colors cursor-pointer ${
+                        password
+                          ? 'bg-amber-950/30 border-amber-500/50 text-amber-300'
+                          : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/80'
+                      }`}
+                    >
+                      <span className="flex items-center gap-1.5 truncate">
+                        <Lock className="w-3.5 h-3.5" />
+                        <span>{password ? 'Password Set' : 'Set Password'}</span>
+                      </span>
+                      {password && (
+                        <span
+                          onClick={handleClearPassword}
+                          className="p-0.5 hover:text-red-400 transition-colors"
+                          title="Remove password"
+                        >
+                          <X className="w-3 h-3" />
+                        </span>
+                      )}
+                    </button>
+                  </div>
+                )}
               </div>
-            </div>
+            )}
 
-            {/* Checkbox Options */}
-            <div className="flex flex-wrap items-center gap-6 pt-1 text-xs text-zinc-300">
-              <label className="flex items-center gap-2 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={solid}
-                  onChange={(e) => setSolid(e.target.checked)}
-                  className="rounded accent-emerald-500 w-3.5 h-3.5"
-                />
-                <span>Solid archive</span>
-              </label>
+            {/* Checkbox Options (format-specific) */}
+            {(format === 'rar' || format === '7z') && (
+              <div className="flex flex-wrap items-center gap-6 pt-1 text-xs text-zinc-300">
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={solid}
+                    onChange={(e) => setSolid(e.target.checked)}
+                    className="rounded accent-emerald-500 w-3.5 h-3.5"
+                  />
+                  <span>Solid archive</span>
+                </label>
 
-              <label className="flex items-center gap-2 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={recoveryRecord}
-                  onChange={(e) => setRecoveryRecord(e.target.checked)}
-                  className="rounded accent-emerald-500 w-3.5 h-3.5"
-                />
-                <span>Recovery record (3%)</span>
-              </label>
-            </div>
+                {format === 'rar' && (
+                  <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={recoveryRecord}
+                      onChange={(e) => setRecoveryRecord(e.target.checked)}
+                      className="rounded accent-emerald-500 w-3.5 h-3.5"
+                    />
+                    <span>Recovery record (3%)</span>
+                  </label>
+                )}
+              </div>
+            )}
 
             {/* Compress Action Button */}
             <div className="pt-2 border-t border-zinc-800/80">

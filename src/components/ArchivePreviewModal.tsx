@@ -123,7 +123,7 @@ export const ArchivePreviewModal: React.FC<ArchivePreviewModalProps> = ({ item, 
           {item.previewType === 'text' && (
             <div className="w-full h-full max-h-[60vh] overflow-auto">
               {isLoadingText ? (
-                <div className="text-zinc-500 text-xs font-mono py-8 text-center">Reading text stream...</div>
+                <div className="text-zinc-500 text-xs font-mono py-8 text-center">Loading text...</div>
               ) : (
                 <pre className="text-xs font-mono text-zinc-300 bg-zinc-900/90 p-4 rounded-xl border border-zinc-800/80 overflow-x-auto whitespace-pre-wrap break-words leading-relaxed select-text">
                   {textContent}
@@ -138,15 +138,15 @@ export const ArchivePreviewModal: React.FC<ArchivePreviewModalProps> = ({ item, 
                 <File className="w-6 h-6" />
               </div>
               <div>
-                <p className="text-sm font-medium text-zinc-300">Preview not available for this binary format</p>
-                <p className="text-xs text-zinc-500 mt-1">Download to inspect with a native desktop application.</p>
+                <p className="text-sm font-medium text-zinc-300">Preview not available</p>
+                <p className="text-xs text-zinc-500 mt-1">Download the file to open it on your device.</p>
               </div>
               <button
                 onClick={handleDownload}
-                className="mt-2 inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium border border-zinc-700 transition-colors"
+                className="mt-2 inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium border border-zinc-700 transition-colors cursor-pointer"
               >
                 <Download className="w-3.5 h-3.5" />
-                <span>Save {item.name} ({formatBytes(item.size)})</span>
+                <span>Download {item.name} ({formatBytes(item.size)})</span>
               </button>
             </div>
           )}

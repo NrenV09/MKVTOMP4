@@ -1,17 +1,12 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
-import { fetchFile, toBlobURL } from '@ffmpeg/util';
-import { 
-  Play, 
-  Settings2, 
-  RotateCcw, 
-  AlertCircle, 
-  Zap, 
-  Sliders, 
+import { fetchFile } from '@ffmpeg/util';
+import {
+  AlertCircle,
+  Zap,
   Loader2,
-  HardDrive,
-  FileVideo,
-  CheckCircle2
+  Film,
+  Archive,
 } from 'lucide-react';
 
 import coreURL from '@ffmpeg/core?url';
@@ -22,23 +17,22 @@ import coreMTURL from '@ffmpeg/core-mt?url';
 import wasmMTURL from '@ffmpeg/core-mt/wasm?url';
 import workerMTURL from '@ffmpeg/core-mt/worker?url';
 
-import { 
-  SourceMetadata, 
-  EncodingConfig, 
-  ProgressTelemetry, 
-  LogMessage, 
+import {
+  SourceMetadata,
+  EncodingConfig,
+  ProgressTelemetry,
+  LogMessage,
   ConversionResult,
   SubtitleTrackInfo,
-  FFmpegDiagnostic
+  FFmpegDiagnostic,
 } from './types';
-import { 
-  buildFFmpegArgs, 
-  getRecommendedExtension, 
-  getMimeType, 
-  formatDuration,
+import {
+  buildFFmpegArgs,
+  getRecommendedExtension,
+  getMimeType,
   checkCompatibility,
   detectDeviceCapabilities,
-  diagnoseFFmpegFailure
+  diagnoseFFmpegFailure,
 } from './utils/ffmpegBuilder';
 import {
   parseFFmpegProbeLogs,
@@ -47,21 +41,18 @@ import {
   getFileExtension,
   detectFileExtensionFromMagicBytes,
 } from './utils/probe';
-import { 
-  detectHardwareCapabilities, 
-  transcodeWithHardwareWebCodecs, 
-  HardwareCapabilities 
+import {
+  detectHardwareCapabilities,
+  transcodeWithHardwareWebCodecs,
+  HardwareCapabilities,
 } from './utils/hardwareEngine';
 import {
   getCachedWasmBlobURL,
-  getWasmCacheStats,
   WASM_ENGINE_CACHE_NAME,
   WASM_RUNTIME_CACHE_NAME,
   ARCHIVE_RUNTIME_CACHE_NAME,
-  WasmCacheStats,
 } from './utils/wasmCache';
 import { preloadAllEnginesToIDB } from './utils/engineIndexedDBCache';
-import { generateSampleMediaFile } from './utils/sampleMediaGenerator';
 
 import { Header, WorkspaceMode } from './components/Header';
 import { MediaDropzone } from './components/MediaDropzone';
@@ -73,10 +64,8 @@ import { ResultPanel } from './components/ResultPanel';
 import { TerminalDock } from './components/TerminalDock';
 import { Footer } from './components/Footer';
 import { ComplianceModal, ComplianceTab } from './components/ComplianceModal';
-import { OfflineIndicator } from './components/OfflineIndicator';
 import { FileCompressorWorkstation } from './components/FileCompressorWorkstation';
 import { PdfLockerWorkstation } from './components/PdfLockerWorkstation';
-import { Film, Archive } from 'lucide-react';
 
 const DEFAULT_CONFIG: EncodingConfig = {
   targetCategory: 'video',
@@ -105,13 +94,11 @@ export default function App() {
   const [engineReady, setEngineReady] = useState(false);
   const [engineLoading, setEngineLoading] = useState(false);
   const [engineError, setEngineError] = useState<string | null>(null);
-  const [engineMode, setEngineMode] = useState<'mt' | 'st'>('st');
 
   const [rawFile, setRawFile] = useState<File | null>(null);
   const [sourceMeta, setSourceMeta] = useState<SourceMetadata | null>(null);
   const [isProbing, setIsProbing] = useState(false);
   const [extractingSubtitleIndex, setExtractingSubtitleIndex] = useState<number | null>(null);
-  const [generatingSample, setGeneratingSample] = useState<string | null>(null);
 
   const [hardwareCaps, setHardwareCaps] = useState<HardwareCapabilities | null>(null);
   const hwAbortController = useRef<AbortController | null>(null);
@@ -136,8 +123,6 @@ export default function App() {
 
   const [logs, setLogs] = useState<LogMessage[]>([]);
   const [terminalOpen, setTerminalOpen] = useState(false);
-  const [wakeLockActive, setWakeLockActive] = useState(false);
-  const [wasmCacheStats, setWasmCacheStats] = useState<WasmCacheStats | null>(null);
   const [complianceOpen, setComplianceOpen] = useState(false);
   const [complianceTab, setComplianceTab] = useState<ComplianceTab>('privacy');
 
@@ -150,7 +135,7 @@ export default function App() {
   const startTimeRef = useRef<number>(0);
   const sourceMetaRef = useRef<SourceMetadata | null>(null);
   const probeLogsBuffer = useRef<string[]>([]);
-  const activeVirtualFiles = useRef<{ inName?: string; outName?: string }>({});
+  const activeVirtualFiles = useRef<{ inMountDir?: string; inName?: string; outName?: string }>({});
   const activeOutputUrlRef = useRef<string | null>(null);
   const wakeLockSentinelRef = useRef<any>(null);
 
@@ -245,8 +230,7 @@ export default function App() {
     }
 
     setIsPurged(true);
-    addLog('system', 'Purged temporary media buffers (WebAssembly engines safely preserved in browser CacheStorage & IndexedDB).');
-    getWasmCacheStats().then(setWasmCacheStats);
+    addLog('system', 'Cleared temporary media buffers from memory.');
   }, [addLog, revokeActiveUrl]);
 
   // Initialize FFmpeg WebAssembly core on-demand
@@ -394,16 +378,15 @@ export default function App() {
             classWorkerURL: workerURL,
           });
           mtLoaded = true;
-          setEngineMode('mt');
-          addLog('system', `Hardware Multi-Threading active (${dev.cores} worker threads allocated from persistent cache).`);
+          addLog('system', `Multi-threaded engine ready (${dev.cores} threads).`);
         } catch (mtErr: any) {
           console.warn('Local multi-threaded core load skipped, falling back to local standard core:', mtErr);
-          addLog('system', `Multi-threading initialization note: ${mtErr?.message || 'sandbox fallback'}. Loading in-app standard engine...`);
+          addLog('system', `Falling back to single-threaded engine: ${mtErr?.message || 'sandbox fallback'}.`);
         }
       }
 
       if (!mtLoaded) {
-        addLog('system', 'Mounting local single-threaded in-app engine...');
+        addLog('system', 'Loading single-threaded engine...');
         const corePath = new URL('/ffmpeg/core/ffmpeg-core.js', window.location.href).href;
         const wasmPath = new URL('/ffmpeg/core/ffmpeg-core.wasm', window.location.href).href;
 
@@ -414,11 +397,11 @@ export default function App() {
 
         if (coreRes.fromCache && wasmRes.fromCache) {
           const cachedMB = ((coreRes.sizeBytes + wasmRes.sizeBytes) / 1024 / 1024).toFixed(1);
-          const srcLabel = coreRes.source === 'cache-storage' ? 'Cache Storage' : coreRes.source === 'indexeddb' ? 'IndexedDB cache' : 'persistent cache';
-          addLog('system', `WebAssembly core loaded directly from ${srcLabel} (${cachedMB} MB, zero network transfer).`);
+          const srcLabel = coreRes.source === 'cache-storage' ? 'Cache Storage' : coreRes.source === 'indexeddb' ? 'IndexedDB' : 'cache';
+          addLog('system', `Engine loaded from ${srcLabel} (${cachedMB} MB).`);
         } else {
           const storedMB = ((coreRes.sizeBytes + wasmRes.sizeBytes) / 1024 / 1024).toFixed(1);
-          addLog('system', `WebAssembly core cached in persistent storage (${storedMB} MB).`);
+          addLog('system', `Engine cached locally (${storedMB} MB).`);
         }
 
         await ffmpeg.load({
@@ -426,15 +409,13 @@ export default function App() {
           wasmURL: wasmRes.blobUrl,
           classWorkerURL: workerURL,
         });
-        setEngineMode('st');
-        addLog('system', 'FFmpeg WebAssembly Core successfully mounted from persistent cache. 100% offline MEMFS ready.');
+        addLog('system', 'FFmpeg engine ready.');
       }
       setEngineReady(true);
-      getWasmCacheStats().then(setWasmCacheStats).catch(() => {});
       return true;
     } catch (err: any) {
       console.error('FFmpeg load error:', err);
-      const msg = err?.message || 'Failed to initialize WebAssembly engine.';
+      const msg = err?.message || 'Failed to initialize media engine.';
       setEngineError(msg);
       addLog('error', `Engine init failure: ${msg}`);
       return false;
@@ -444,20 +425,9 @@ export default function App() {
   };
 
   useEffect(() => {
-    const refreshCacheStats = () => {
-      getWasmCacheStats().then(setWasmCacheStats).catch(() => {});
-    };
-
-    refreshCacheStats();
-    window.addEventListener('wasm-cache-updated', refreshCacheStats);
-
-    // Silently ensure all WebAssembly engines stay persisted in IndexedDB & CacheStorage
-    preloadAllEnginesToIDB()
-      .then(() => refreshCacheStats())
-      .catch(() => {});
+    preloadAllEnginesToIDB().catch(() => {});
 
     return () => {
-      window.removeEventListener('wasm-cache-updated', refreshCacheStats);
       revokeActiveUrl();
     };
   }, [revokeActiveUrl]);
@@ -756,28 +726,6 @@ export default function App() {
     }
   };
 
-  // Synthesize a real in-browser sample media file (MKV+SRT, MP4, or WAV) for instant offline testing
-  const handleGenerateSample = async (kind: 'mkv-multitrack' | 'mp4-stream' | 'wav-audio') => {
-    setGeneratingSample(kind);
-    try {
-      if (kind !== 'wav-audio' && (!ffmpegRef.current || !ffmpegRef.current.loaded)) {
-        addLog('system', 'Mounting local FFmpeg WebAssembly engine to synthesize test stream...');
-        const ok = await initEngine();
-        if (!ok || !ffmpegRef.current) {
-          throw new Error('Could not initialize local WebAssembly engine.');
-        }
-      }
-      addLog('system', `Synthesizing offline sample stream (${kind})...`);
-      const sampleFile = await generateSampleMediaFile(ffmpegRef.current!, kind);
-      addLog('system', `Generated ${sampleFile.name} (${(sampleFile.size / 1024).toFixed(1)} KB). Loading into inspector...`);
-      await handleFileSelected(sampleFile);
-    } catch (err: any) {
-      addLog('error', `Sample synthesis failed: ${err?.message || 'Unknown error'}`);
-    } finally {
-      setGeneratingSample(null);
-    }
-  };
-
   const handleClearFile = () => {
     revokeActiveUrl();
     setIsPurged(false);
@@ -831,8 +779,6 @@ export default function App() {
       try {
         const lock = await (navigator as any).wakeLock.request('screen');
         wakeLockSentinelRef.current = lock;
-        setWakeLockActive(true);
-        addLog('system', 'Acquired Screen Wake Lock.');
       } catch (wakeErr) {
         console.warn('Wake Lock request skipped:', wakeErr);
       }
@@ -1339,15 +1285,11 @@ export default function App() {
       setConversionError(`${diag.title}: ${diag.explanation}`);
       addLog('error', `Execution failed: ${errorMsg}`);
     } finally {
-      // Release Screen Wake Lock
       if (wakeLockSentinelRef.current) {
         try {
           await wakeLockSentinelRef.current.release();
-        } catch {
-          // ignore
-        }
+        } catch {}
         wakeLockSentinelRef.current = null;
-        setWakeLockActive(false);
       }
       setIsConverting(false);
     }
@@ -1355,7 +1297,7 @@ export default function App() {
 
   // Abort ongoing job
   const handleAbort = async () => {
-    addLog('error', 'User aborted conversion process. Terminating workers...');
+    addLog('error', 'Conversion canceled.');
     if (hwAbortController.current) {
       try {
         hwAbortController.current.abort();
@@ -1365,23 +1307,17 @@ export default function App() {
     if (wakeLockSentinelRef.current) {
       try {
         await wakeLockSentinelRef.current.release();
-      } catch {
-        // ignore
-      }
+      } catch {}
       wakeLockSentinelRef.current = null;
-      setWakeLockActive(false);
     }
     if (ffmpegRef.current) {
       try {
         ffmpegRef.current.terminate();
-      } catch {
-        // ignore
-      }
+      } catch {}
     }
     setIsConverting(false);
-    setConversionError('Conversion process was terminated by user.');
+    setConversionError('Conversion was canceled.');
     setEngineReady(false);
-    // Reboot engine
     initEngine();
   };
 
@@ -1395,98 +1331,73 @@ export default function App() {
 
   return (
     <div className="min-h-screen text-zinc-100 flex flex-col font-sans selection:bg-cyan-500/20 selection:text-cyan-300">
-      {/* Workstation Header */}
       <Header
-        engineReady={engineReady}
-        engineLoading={engineLoading}
-        engineMode={engineMode}
         terminalOpen={terminalOpen}
         toggleTerminal={() => setTerminalOpen(!terminalOpen)}
         logCount={logs.length}
-        wakeLockActive={wakeLockActive}
-        hardwareCaps={hardwareCaps}
-        onPurgeCache={purgeAllCaches}
-        wasmCacheStats={wasmCacheStats}
-        onOpenCompliance={handleOpenCompliance}
         activeWorkspace={workspaceMode}
         onSelectWorkspace={setWorkspaceMode}
-        onInitEngine={initEngine}
       />
 
-      {/* Main Workstation Canvas */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5 lg:p-6 space-y-4">
-        {/* Engine Alert (if loading error) */}
         {engineError && (
           <div className="p-4 rounded-xl bg-red-950/40 border border-red-800/80 text-red-200 text-xs font-mono flex items-start gap-3">
             <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
             <div>
-              <div className="font-semibold text-red-400 text-sm">Media Engine Failed to Initialize</div>
+              <div className="font-semibold text-red-400 text-sm">Engine Failed to Load</div>
               <p className="mt-1 text-red-300/90">{engineError}</p>
               <button
                 onClick={initEngine}
                 className="mt-2.5 px-3 py-1 rounded bg-red-900 hover:bg-red-800 text-red-100 border border-red-700 transition-colors cursor-pointer"
               >
-                Retry Initialization
+                Retry
               </button>
             </div>
           </div>
         )}
 
-        {/* Global Conversion Error & Actionable Diagnostics */}
         {conversionError && (
           <div className="p-4 rounded-xl bg-red-950/40 border border-red-800/80 text-red-200 text-xs font-mono flex items-start gap-3">
             <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
             <div className="flex-1">
               <div className="font-semibold text-red-400 text-sm">
-                {conversionDiagnostic ? conversionDiagnostic.title : 'Conversion Pipeline Error'}
+                {conversionDiagnostic ? conversionDiagnostic.title : 'Conversion Error'}
               </div>
               <p className="mt-1 text-red-300/90">
                 {conversionDiagnostic ? conversionDiagnostic.explanation : conversionError}
               </p>
               <div className="mt-2 text-[11px] text-amber-300/90 bg-red-950/60 border border-red-800/50 rounded px-2.5 py-1.5">
-                <strong>Recommended Action:</strong>{' '}
+                <strong>Try this:</strong>{' '}
                 {conversionDiagnostic
                   ? conversionDiagnostic.suggestion
-                  : 'If you used Stream Copy, select H.264 / AAC under encoding controls or uncheck incompatible subtitle tracks.'}
+                  : 'Switch to H.264 / AAC or drop incompatible subtitle tracks.'}
               </div>
             </div>
           </div>
         )}
 
-        {/* WORKSPACE VIEWS */}
         {workspaceMode === 'pdf' ? (
-          /* Offline PDF Locker & Unlocker Vault */
           <PdfLockerWorkstation onLog={addLog} />
         ) : workspaceMode === 'compressor' ? (
-          /* File Compressor & Decompressor Full View */
           <FileCompressorWorkstation />
         ) : workspaceMode === 'split' ? (
-          /* Side-by-Side Split View */
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
-            {/* Left Column: Media Converter */}
             <div className="space-y-4">
               <div className="p-3 rounded-xl cyber-panel flex items-center justify-between">
                 <span className="text-xs font-mono font-bold uppercase tracking-wider text-cyan-300 flex items-center gap-2">
                   <Film className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>MEDIA REMUX & TRANSCODE DECK</span>
+                  <span>Media</span>
                 </span>
                 <button
                   onClick={() => setWorkspaceMode('media')}
                   className="text-[11px] font-mono text-zinc-400 hover:text-cyan-300 transition-colors cursor-pointer"
                 >
-                  Focus View →
+                  Expand →
                 </button>
               </div>
 
               {!sourceMeta ? (
-                <div className="space-y-3">
-                  <MediaDropzone
-                    onFileSelected={handleFileSelected}
-                    disabled={false}
-                    onGenerateSample={handleGenerateSample}
-                    generatingSample={generatingSample}
-                  />
-                </div>
+                <MediaDropzone onFileSelected={handleFileSelected} disabled={false} />
               ) : (
                 <div className="space-y-4">
                   <SourceInspector
@@ -1498,7 +1409,6 @@ export default function App() {
                     onChangeConfig={setConfig}
                     onExtractSubtitle={handleExtractSubtitleSrt}
                     extractingSubtitleIndex={extractingSubtitleIndex}
-                    onReprobe={() => rawFile && handleFileSelected(rawFile)}
                   />
 
                   {result ? (
@@ -1537,15 +1447,15 @@ export default function App() {
                           </div>
                           <div>
                             <div className="text-sm font-mono font-bold text-zinc-100 flex items-center gap-2">
-                              <span>TARGET CONTAINER</span>
+                              <span>Output</span>
                               <span className="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 font-mono text-xs uppercase font-bold">
                                 .{config.container}
                               </span>
                             </div>
                             <div className="text-xs text-zinc-400 font-mono mt-0.5">
                               {config.videoCodec === 'copy' && config.audioCodec === 'copy'
-                                ? 'Direct stream copy (OPFS / 16 MB Paged Storage)'
-                                : `Transcode (${config.speedPreset})`}
+                                ? 'Direct copy (no re-encoding)'
+                                : `Re-encode (${config.speedPreset})`}
                             </div>
                           </div>
                         </div>
@@ -1558,37 +1468,32 @@ export default function App() {
                           {engineLoading ? (
                             <>
                               <Loader2 className="w-4 h-4 animate-spin text-zinc-950" />
-                              <span>Mounting Engine...</span>
+                              <span>Loading...</span>
                             </>
                           ) : (
-                            <span>Execute .{config.container.toUpperCase()} Pipeline</span>
+                            <span>Convert to .{config.container.toUpperCase()}</span>
                           )}
                         </button>
                       </div>
 
-                      <CommandPreview
-                        commandArgs={currentCommandArgs}
-                        onExecute={handleStartConversion}
-                        disabled={!rawFile || isConverting || engineLoading}
-                      />
+                      <CommandPreview commandArgs={currentCommandArgs} />
                     </div>
                   )}
                 </div>
               )}
             </div>
 
-            {/* Right Column: File Compressor & Decompressor */}
             <div className="space-y-4">
               <div className="p-3 rounded-xl cyber-panel flex items-center justify-between">
                 <span className="text-xs font-mono font-bold uppercase tracking-wider text-emerald-300 flex items-center gap-2">
                   <Archive className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>ARCHIVE LAB (ZIP / TAR / GZ)</span>
+                  <span>Archive</span>
                 </span>
                 <button
                   onClick={() => setWorkspaceMode('compressor')}
                   className="text-[11px] font-mono text-zinc-400 hover:text-emerald-400 transition-colors cursor-pointer"
                 >
-                  Focus View →
+                  Expand →
                 </button>
               </div>
 
@@ -1596,17 +1501,9 @@ export default function App() {
             </div>
           </div>
         ) : (
-          /* Media Converter Standard Full View */
           <>
             {!sourceMeta ? (
-              <div className="space-y-3">
-                <MediaDropzone
-                  onFileSelected={handleFileSelected}
-                  disabled={false}
-                  onGenerateSample={handleGenerateSample}
-                  generatingSample={generatingSample}
-                />
-              </div>
+              <MediaDropzone onFileSelected={handleFileSelected} disabled={false} />
             ) : (
               <div className="space-y-4">
                 <SourceInspector
@@ -1618,10 +1515,8 @@ export default function App() {
                   onChangeConfig={setConfig}
                   onExtractSubtitle={handleExtractSubtitleSrt}
                   extractingSubtitleIndex={extractingSubtitleIndex}
-                  onReprobe={() => rawFile && handleFileSelected(rawFile)}
                 />
 
-                {/* 2. RESULT PANEL (If completed) */}
                 {result ? (
                   <ResultPanel
                     result={result}
@@ -1636,14 +1531,12 @@ export default function App() {
                     isPurged={isPurged}
                   />
                 ) : isConverting ? (
-                  /* 3. ACTIVE CONVERSION PROGRESS ENGINE */
                   <ProgressEngine
                     telemetry={telemetry}
                     onCancel={handleAbort}
                     outputName={sourceMeta.name.replace(/\.[^/.]+$/, '') + getRecommendedExtension(config.container)}
                   />
                 ) : (
-                  /* 4. ENCODING CONTROLS & COMMAND PREVIEW */
                   <div className="space-y-4">
                     <EncodingControls
                       config={config}
@@ -1653,7 +1546,6 @@ export default function App() {
                       hardwareCaps={hardwareCaps}
                     />
 
-                    {/* Primary Action Button & Summary */}
                     <div className="cyber-panel rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xl">
                       <div className="flex items-center gap-3 w-full sm:w-auto">
                         <div className="w-10 h-10 rounded-xl bg-cyan-500/10 border border-cyan-500/40 flex items-center justify-center text-cyan-400 shrink-0 shadow-[0_0_15px_rgba(0,240,255,0.18)]">
@@ -1661,19 +1553,20 @@ export default function App() {
                         </div>
                         <div>
                           <div className="text-sm font-mono font-bold text-zinc-100 flex items-center gap-2">
-                            <span>TARGET FORMAT //</span>
+                            <span>Output</span>
                             <span className="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 font-mono text-xs uppercase font-bold">
                               .{config.container}
                             </span>
                           </div>
                           <div className="text-xs text-zinc-400 font-mono mt-0.5">
                             {config.videoCodec === 'copy' && config.audioCodec === 'copy'
-                              ? '⚡ Direct stream copy (lossless passthrough • OPFS / 16 MB Paged Storage)'
+                              ? 'Direct copy (no re-encoding)'
                               : config.videoCodec === 'copy'
-                              ? '⚡ Video passthrough (stream copy) • Conditional AAC Audio transcode'
-                              : config.hardwareAcceleration !== false && (hardwareCaps?.webcodecs.hwH264 || hardwareCaps?.webcodecs.available)
-                              ? '⚡ Hardware-accelerated encoding via WebCodecs & GPU'
-                              : `CPU multi-core transcode (${config.speedPreset})`}
+                              ? 'Video copy + audio convert'
+                              : config.hardwareAcceleration !== false &&
+                                (hardwareCaps?.webcodecs.hwH264 || hardwareCaps?.webcodecs.available)
+                              ? 'Hardware encode'
+                              : `Re-encode (${config.speedPreset})`}
                           </div>
                         </div>
                       </div>
@@ -1681,25 +1574,21 @@ export default function App() {
                       <button
                         onClick={handleStartConversion}
                         disabled={!rawFile || isConverting || engineLoading}
-                        aria-label={`Convert media file to ${config.container.toUpperCase()} container`}
+                        aria-label={`Convert media file to ${config.container.toUpperCase()}`}
                         className="cyber-btn-primary w-full sm:w-auto px-8 py-3.5 rounded-xl text-sm tracking-wide transition-all flex items-center justify-center gap-2.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed hover:scale-[1.02] active:scale-[0.98] focus:outline-none"
                       >
                         {engineLoading ? (
                           <>
                             <Loader2 className="w-4 h-4 animate-spin text-zinc-950" />
-                            <span>Mounting Engine...</span>
+                            <span>Loading...</span>
                           </>
                         ) : (
-                          <span>Execute .{config.container.toUpperCase()} Pipeline</span>
+                          <span>Convert to .{config.container.toUpperCase()}</span>
                         )}
                       </button>
                     </div>
 
-                    <CommandPreview
-                      commandArgs={currentCommandArgs}
-                      onExecute={handleStartConversion}
-                      disabled={!rawFile || isConverting || engineLoading}
-                    />
+                    <CommandPreview commandArgs={currentCommandArgs} />
                   </div>
                 )}
               </div>
@@ -1708,10 +1597,8 @@ export default function App() {
         )}
       </main>
 
-      {/* Compliance & Legal Footer */}
       <Footer onOpenCompliance={handleOpenCompliance} />
 
-      {/* Terminal Telemetry Dock */}
       <TerminalDock
         logs={logs}
         isOpen={terminalOpen}
@@ -1719,15 +1606,11 @@ export default function App() {
         onClear={() => setLogs([])}
       />
 
-      {/* Legal, Privacy & Compliance Transparency Modal */}
       <ComplianceModal
         isOpen={complianceOpen}
         onClose={() => setComplianceOpen(false)}
         defaultTab={complianceTab}
       />
-
-      {/* Real-time Offline Connectivity Status Indicator */}
-      <OfflineIndicator />
     </div>
   );
 }
