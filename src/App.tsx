@@ -523,8 +523,17 @@ export default function App() {
         );
 
         if (mounted) {
-          // Calling ffmpeg -i probeVirtualPath reads only header slices from disk (0 MB RAM)
-          await ffmpegRef.current.exec(['-i', probeVirtualPath]);
+          // Fast header-only probe via buffered WORKERFS (0 MB RAM, bounded probesize for instant multi-GB inspection)
+          await ffmpegRef.current.exec([
+            '-hide_banner',
+            '-nostdin',
+            '-probesize',
+            '4M',
+            '-analyzeduration',
+            '2000000',
+            '-i',
+            probeVirtualPath,
+          ]);
         }
 
         const parsed = parseFFmpegProbeLogs(probeLogsBuffer.current);
@@ -833,7 +842,16 @@ export default function App() {
       if (!effectiveMeta.videoCodec && !effectiveMeta.audioCodec) {
         try {
           probeLogsBuffer.current = [];
-          await ffmpeg.exec(['-i', virtualIn]);
+          await ffmpeg.exec([
+            '-hide_banner',
+            '-nostdin',
+            '-probesize',
+            '4M',
+            '-analyzeduration',
+            '2000000',
+            '-i',
+            virtualIn,
+          ]);
           const parsed = parseFFmpegProbeLogs(probeLogsBuffer.current);
           effectiveMeta = {
             ...effectiveMeta,
@@ -863,9 +881,18 @@ export default function App() {
         } catch {}
       }
 
-      // Helper to export output file as a disk/paged Blob without allocating a multi-GB Uint8Array
-      const readOutputAsBlob = async (outPath: string, mime: string): Promise<Blob> => {
-        const res = await ffmpeg.readFile(outPath, `blob:${mime}` as any);
+      const isMp4OrMov = config.container === 'mp4' || config.container === 'mov';
+      const useZeroCopyFastStart = isMp4OrMov && config.fastStart !== false;
+      const execBuildOptions = { deferFastStartToWorker: useZeroCopyFastStart };
+
+      // Helper to export output file as a disk/paged Blob (with instant zero-copy faststart when enabled)
+      const readOutputAsBlob = async (
+        outPath: string,
+        mime: string,
+        applyFastStart = false
+      ): Promise<Blob> => {
+        const enc = applyFastStart ? `blob+faststart:${mime}` : `blob:${mime}`;
+        const res = await ffmpeg.readFile(outPath, enc as any);
         if (res instanceof Blob) {
           return res;
         }
@@ -874,7 +901,7 @@ export default function App() {
 
       // Pipeline selection:
       const devCaps = detectDeviceCapabilities();
-      const hwMaxBytes = devCaps.isAndroid ? 120 * 1024 * 1024 : 300 * 1024 * 1024;
+      const hwMaxBytes = devCaps.isAndroid ? 250 * 1024 * 1024 : 400 * 1024 * 1024;
       const isVideoTarget = config.targetCategory === 'video' && config.container !== 'gif';
       const isCopy = isVideoTarget && config.videoCodec === 'copy';
       const isTargetMp4 = config.container === 'mp4';
@@ -892,16 +919,16 @@ export default function App() {
       let executedCommand: string[] = [];
 
       if (isCopy) {
-        // DIRECT STREAM COPY (Instant passthrough with automatic smart fallback)
+        // DIRECT STREAM COPY (Single-pass buffered I/O + zero-copy fast-start)
         setTelemetry((prev) => ({
           ...prev,
           accelerationMode: devCaps.isAndroid
             ? `Direct Stream Copy (${devCaps.chipLabel})`
-            : 'Direct Stream Copy (Zero-Copy Disk Stream)',
+            : 'Direct Stream Copy (Single-Pass Zero-Copy)',
         }));
-        addLog('system', 'Direct stream copy enabled. Zero re-encoding passthrough pipeline (OPFS / Paged Storage).');
+        addLog('system', 'Single-pass direct stream copy enabled (buffered 4-8 MB I/O + zero-copy fast-start).');
         probeLogsBuffer.current = [];
-        executedCommand = buildFFmpegArgs(virtualIn, virtualOut, config, effectiveMeta);
+        executedCommand = buildFFmpegArgs(virtualIn, virtualOut, config, effectiveMeta, execBuildOptions);
         addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
 
         let returnCode = await ffmpeg.exec(executedCommand);
@@ -943,7 +970,8 @@ export default function App() {
             virtualIn,
             virtualOut,
             { ...config, subtitleMode: 'drop', selectedSubtitleTrackIndices: [] },
-            effectiveMeta
+            effectiveMeta,
+            execBuildOptions
           );
           addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
           returnCode = await ffmpeg.exec(executedCommand);
@@ -970,7 +998,8 @@ export default function App() {
               videoTracks: undefined,
               audioTracks: undefined,
               subtitleTracks: undefined,
-            }
+            },
+            execBuildOptions
           );
           addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
           returnCode = await ffmpeg.exec(executedCommand);
@@ -988,7 +1017,8 @@ export default function App() {
             virtualIn,
             virtualOut,
             { ...config, audioCodec: fallbackAudioCodec, audioBitrate: '192k' },
-            effectiveMeta
+            effectiveMeta,
+            execBuildOptions
           );
           addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
           returnCode = await ffmpeg.exec(executedCommand);
@@ -1021,7 +1051,8 @@ export default function App() {
               audioCodec: fallbackAudioCodec,
               speedPreset: 'ultrafast',
             },
-            effectiveMeta
+            effectiveMeta,
+            execBuildOptions
           );
           addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
           returnCode = await ffmpeg.exec(executedCommand);
@@ -1034,23 +1065,25 @@ export default function App() {
         }
 
         const mimeType = getMimeType(config.container);
-        outputBlob = await readOutputAsBlob(virtualOut, mimeType);
+        outputBlob = await readOutputAsBlob(virtualOut, mimeType, useZeroCopyFastStart);
       } else if (canHardwareWebCodecs) {
         // WEBGPU & WEBCODECS HARDWARE ACCELERATION
         setTelemetry((prev) => ({
           ...prev,
-          accelerationMode: 'WebGPU & VideoToolbox Hardware Engine',
+          accelerationMode: devCaps.isAndroid
+            ? `Hardware GPU (${devCaps.chipLabel})`
+            : 'Hardware GPU Media Engine',
         }));
-        addLog('system', 'Initializing WebCodecs & WebGPU hardware video pipeline...');
+        addLog('system', 'Initializing hardware GPU video pipeline...');
 
         let sourceBlobForHw: Blob = rawFile;
         if (extIn.toLowerCase() === '.mkv' || extIn.toLowerCase() === '.avi') {
           addLog('system', 'Pre-flight stream remuxing for hardware video decoder...');
           const tempRemuxOut = `temp_hw_remux_${Date.now()}.mp4`;
-          const remuxArgs = ['-threads', '0', '-i', virtualIn, '-c:v', 'copy', '-c:a', 'aac', tempRemuxOut];
+          const remuxArgs = ['-hide_banner', '-nostdin', '-threads', '1', '-i', virtualIn, '-c:v', 'copy', '-an', tempRemuxOut];
           const remuxCode = await ffmpeg.exec(remuxArgs);
           if (remuxCode === 0) {
-            sourceBlobForHw = await readOutputAsBlob(tempRemuxOut, 'video/mp4');
+            sourceBlobForHw = await readOutputAsBlob(tempRemuxOut, 'video/mp4', true);
             try { await ffmpeg.deleteFile(tempRemuxOut); } catch {}
           }
         }
@@ -1088,7 +1121,9 @@ export default function App() {
                 speed: `${p.fps} fps (Hardware)`,
                 elapsedMs: elapsed,
                 etaSeconds: remainingSec !== null ? Math.max(0, Math.round(remainingSec)) : null,
-                accelerationMode: 'WebGPU & VideoToolbox Hardware Engine',
+                accelerationMode: devCaps.isAndroid
+                  ? `Hardware GPU (${devCaps.chipLabel})`
+                  : 'Hardware GPU Media Engine',
               });
             },
           });
@@ -1107,7 +1142,9 @@ export default function App() {
             );
             try {
               const muxArgs = [
-                '-threads', '0',
+                '-hide_banner',
+                '-nostdin',
+                '-threads', '1',
                 '-i', hwVirtualPath,
                 '-i', virtualIn,
                 '-map', '0:v:0',
@@ -1120,7 +1157,7 @@ export default function App() {
               ];
               const muxCode = await ffmpeg.exec(muxArgs);
               if (muxCode === 0) {
-                outputBlob = await readOutputAsBlob(virtualOut, 'video/mp4');
+                outputBlob = await readOutputAsBlob(virtualOut, 'video/mp4', useZeroCopyFastStart);
               } else {
                 outputBlob = hwVideoBlob;
               }
@@ -1143,24 +1180,24 @@ export default function App() {
           if (hwAbortController.current?.signal.aborted) {
             throw hwErr;
           }
-          addLog('system', `Hardware encoder fallback (${hwErr?.message || 'hardware unavailable'}). Switching to multi-threaded CPU software.`);
-          executedCommand = buildFFmpegArgs(virtualIn, virtualOut, config, effectiveMeta);
+          addLog('system', `Hardware encoder fallback (${hwErr?.message || 'hardware unavailable'}). Switching to CPU encoder.`);
+          executedCommand = buildFFmpegArgs(virtualIn, virtualOut, config, effectiveMeta, execBuildOptions);
           addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
           const returnCode = await ffmpeg.exec(executedCommand);
           if (returnCode !== 0) {
             throw new Error(`FFmpeg conversion returned exit code ${returnCode}.`);
           }
           const mimeType = getMimeType(config.container);
-          outputBlob = await readOutputAsBlob(virtualOut, mimeType);
+          outputBlob = await readOutputAsBlob(virtualOut, mimeType, useZeroCopyFastStart);
         }
       } else {
         // MULTI-THREADED CPU WASM (Video or Audio conversion)
         setTelemetry((prev) => ({
           ...prev,
-          accelerationMode: 'Multi-threaded CPU Wasm',
+          accelerationMode: 'CPU Wasm',
         }));
         probeLogsBuffer.current = [];
-        executedCommand = buildFFmpegArgs(virtualIn, virtualOut, config, effectiveMeta);
+        executedCommand = buildFFmpegArgs(virtualIn, virtualOut, config, effectiveMeta, execBuildOptions);
         addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
         let returnCode = await ffmpeg.exec(executedCommand);
 
@@ -1185,7 +1222,8 @@ export default function App() {
               videoTracks: undefined,
               audioTracks: undefined,
               subtitleTracks: undefined,
-            }
+            },
+            execBuildOptions
           );
           addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
           returnCode = await ffmpeg.exec(executedCommand);
@@ -1209,18 +1247,19 @@ export default function App() {
             virtualIn,
             virtualOut,
             { ...config, audioCodec: fallbackAudio as any },
-            effectiveMeta
+            effectiveMeta,
+            execBuildOptions
           );
           returnCode = await ffmpeg.exec(executedCommand);
         }
 
         if (returnCode !== 0) {
           throw new Error(
-            `FFmpeg conversion returned exit code ${returnCode}. Check console telemetry for detailed codec diagnostics.`
+            `FFmpeg conversion returned exit code ${returnCode}. Check console logs for codec details.`
           );
         }
         const mimeType = getMimeType(config.container);
-        outputBlob = await readOutputAsBlob(virtualOut, mimeType);
+        outputBlob = await readOutputAsBlob(virtualOut, mimeType, useZeroCopyFastStart);
       }
 
       // Unmount WORKERFS input stream immediately

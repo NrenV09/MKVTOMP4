@@ -373,16 +373,35 @@ export function detectDeviceCapabilities(): DeviceCapabilities {
   };
 }
 
+export interface BuildFFmpegOptions {
+  /**
+   * When true, omits FFmpeg's slow 2nd-pass `-movflags +faststart` full-file rewrite
+   * because the Web Worker relocates `moov` in zero-copy (~5 ms) after single-pass muxing.
+   */
+  deferFastStartToWorker?: boolean;
+}
+
 export function buildFFmpegArgs(
   inputFilename: string,
   outputFilename: string,
   config: EncodingConfig,
-  source?: SourceMetadata | null
+  source?: SourceMetadata | null,
+  options?: BuildFFmpegOptions
 ): string[] {
   const args: string[] = [];
 
-  // Multi-threading optimization: -threads 0 lets FFmpeg use available worker threads
-  args.push('-threads', '0');
+  // Suppress banner spam and stdin checks for lower worker overhead
+  args.push('-hide_banner', '-nostdin');
+
+  const isPureStreamCopy =
+    config.targetCategory === 'video' &&
+    config.container !== 'gif' &&
+    config.videoCodec === 'copy' &&
+    (config.audioCodec === 'copy' || config.audioCodec === 'none');
+
+  // Pure stream-copy remuxing is I/O-bound; avoid thread queue overhead on mobile single-thread WASM
+  const threadArg = isPureStreamCopy ? '1' : '0';
+  args.push('-threads', threadArg);
 
   // Generate missing PTS/DTS on VFR Android screen recordings, camera clips, and MPEG-TS/MKV streams
   args.push('-fflags', '+genpts');
@@ -390,8 +409,10 @@ export function buildFFmpegArgs(
   // Input file
   args.push('-i', inputFilename);
 
-  // Multi-threaded encoder
-  args.push('-threads', '0');
+  // Output encoder thread allocation
+  if (!isPureStreamCopy) {
+    args.push('-threads', '0');
+  }
 
   // AUDIO ONLY EXTRACTION
   if (config.targetCategory === 'audio') {
@@ -754,9 +775,11 @@ export function buildFFmpegArgs(
   }
   args.push('-max_muxing_queue_size', '4096');
 
-  // 7. Always inject -movflags +faststart for MP4/MOV when fastStart is enabled (default true)
-  // Places the MP4 moov atom at the front of the file for immediate playback and seeking on Android & iOS
-  if (isAppleTarget && config.fastStart !== false) {
+  // 7. Fast-start moov atom placement for MP4/MOV:
+  // When executing inside our Web Worker (deferFastStartToWorker=true), FFmpeg writes in ONE
+  // single sequential pass and the worker relocates `moov` in zero-copy (~5 ms), avoiding
+  // FFmpeg's slow 2nd full-file copy pass on Snapdragon/MediaTek mobile flash storage.
+  if (isAppleTarget && config.fastStart !== false && !options?.deferFastStartToWorker) {
     args.push('-movflags', '+faststart');
   }
 

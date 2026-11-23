@@ -259,14 +259,36 @@ export async function transcodeWithHardwareWebCodecs(
         const framerate = options.framerate || 30;
         const bitrate = options.bitrate || Math.min(25_000_000, Math.round(width * height * framerate * 0.1));
 
-        // Selected codec (defaults to H.264 High Profile)
-        const codec = options.codec || 'avc1.640033';
+        // Pick the highest H.264/HEVC hardware profile accepted by Snapdragon/MediaTek/Apple MediaCodec
+        const candidateCodecs: string[] = options.codec
+          ? [options.codec]
+          : ['avc1.640033', 'avc1.64002a', 'avc1.4d0029', 'avc1.42001f'];
+
+        let selectedCodec = candidateCodecs[0];
+        if (typeof VideoEncoder.isConfigSupported === 'function') {
+          for (const candidate of candidateCodecs) {
+            try {
+              const support = await VideoEncoder.isConfigSupported({
+                codec: candidate,
+                width,
+                height,
+                bitrate,
+                framerate,
+                hardwareAcceleration: 'prefer-hardware',
+              });
+              if (support.supported) {
+                selectedCodec = candidate;
+                break;
+              }
+            } catch {}
+          }
+        }
 
         // Setup MP4 Muxer with ArrayBufferTarget
         const muxer = new Muxer({
           target: new ArrayBufferTarget(),
           video: {
-            codec: codec.startsWith('hvc1') ? 'hevc' : 'avc',
+            codec: selectedCodec.startsWith('hvc1') ? 'hevc' : 'avc',
             width,
             height,
           },
@@ -290,72 +312,28 @@ export async function transcodeWithHardwareWebCodecs(
         });
 
         encoder.configure({
-          codec,
+          codec: selectedCodec,
           width,
           height,
           bitrate,
           framerate,
-          hardwareAcceleration: 'prefer-hardware', // HARDWARE ACCELERATION DIRECT TO GPU
+          hardwareAcceleration: 'prefer-hardware',
+          latencyMode: 'quality',
         });
 
-        // Setup offscreen canvas or WebGPU texture for frame grabbing
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        let gpuDevice: GPUDevice | null = null;
-        let computePipeline: any = null;
-        let gpuContext: any = null;
+        // Only allocate 2D canvas if resizing is needed; otherwise capture VideoFrame directly from GPU decoder (zero-copy!)
+        const canDirectZeroCopyFrame =
+          width === sourceWidth && height === sourceHeight && options.webgpuFilter !== 'grayscale';
 
-        if (options.webgpuFilter === 'grayscale' && (navigator as any).gpu) {
-          const adapter = await (navigator as any).gpu.requestAdapter();
-          if (adapter) {
-            gpuDevice = await adapter.requestDevice();
-            gpuContext = canvas.getContext('webgpu' as any);
-            if (gpuContext) {
-              gpuContext.configure({
-                device: gpuDevice,
-                format: (navigator as any).gpu.getPreferredCanvasFormat(),
-                usage: 0x02 /* GPUTextureUsage.STORAGE_BINDING */ | 0x10 /* GPUTextureUsage.RENDER_ATTACHMENT */,
-              });
-
-              const shaderModule = gpuDevice.createShaderModule({
-                code: `
-                  @group(0) @binding(0) var inputTex: texture_external;
-                  @group(0) @binding(1) var outputTex: texture_storage_2d<bgra8unorm, write>;
-
-                  @compute @workgroup_size(16, 16)
-                  fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-                    let dims = textureDimensions(inputTex);
-                    if (id.x >= dims.x || id.y >= dims.y) {
-                      return;
-                    }
-                    let color = textureLoad(inputTex, vec2<i32>(id.xy));
-                    let brightness = 1.1;
-                    let luma = color.r * 0.299 + color.g * 0.587 + color.b * 0.114;
-                    let adjusted = vec4<f32>(vec3<f32>(luma * brightness), color.a);
-                    textureStore(outputTex, vec2<i32>(id.xy), adjusted);
-                  }
-                `,
-              });
-
-              computePipeline = await gpuDevice.createComputePipelineAsync({
-                layout: 'auto',
-                compute: {
-                  module: shaderModule,
-                  entryPoint: 'main',
-                },
-              });
-            } else {
-              console.warn('WebGPU context not available on canvas, falling back to 2D.');
-            }
-          }
-        }
-
+        let canvas: HTMLCanvasElement | null = null;
         let ctx: CanvasRenderingContext2D | null = null;
-        if (!gpuContext) {
+        if (!canDirectZeroCopyFrame) {
+          canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
           ctx = canvas.getContext('2d', { alpha: false });
           if (!ctx) {
-            throw new Error('Failed to initialize 2D rendering context for hardware frame processing.');
+            throw new Error('Failed to initialize 2D rendering context for hardware frame scaling.');
           }
         }
 
@@ -364,6 +342,7 @@ export async function transcodeWithHardwareWebCodecs(
 
         let frameIndex = 0;
         const startTime = Date.now();
+        let lastProgressAt = 0;
 
         const stepThrough = async () => {
           if (options.signal?.aborted) {
@@ -374,9 +353,14 @@ export async function transcodeWithHardwareWebCodecs(
 
           if (encoderFailed) return;
 
+          // Respect hardware encoder queue backpressure without artificial 60fps display VSync cap
+          if (encoder.encodeQueueSize > 6) {
+            setTimeout(stepThrough, 4);
+            return;
+          }
+
           const targetTime = frameIndex * timeInterval;
           if (targetTime >= duration || frameIndex >= totalSteps) {
-            // Finished feeding all frames
             await encoder.flush();
             muxer.finalize();
 
@@ -397,66 +381,38 @@ export async function transcodeWithHardwareWebCodecs(
             video.addEventListener('seeked', onSeeked);
           });
 
-          // Draw to canvas and construct hardware VideoFrame
           const timestampMicros = Math.round(targetTime * 1_000_000);
           const durationMicros = Math.round(timeInterval * 1_000_000);
           let frame: VideoFrame;
 
-          if (gpuContext && gpuDevice && computePipeline) {
-            // WEBGPU ZERO-COPY PIPELINE
-            const rawFrame = new VideoFrame(video, {
+          if (canDirectZeroCopyFrame) {
+            // Direct GPU texture handoff from Android MediaCodec / VideoToolbox decoder -> VideoEncoder
+            frame = new VideoFrame(video, {
               timestamp: timestampMicros,
               duration: durationMicros,
             });
-
-            const sourceTexture = gpuDevice.importExternalTexture({ source: rawFrame });
-            const outputTexture = gpuContext.getCurrentTexture();
-
-            const bindGroup = gpuDevice.createBindGroup({
-              layout: computePipeline.getBindGroupLayout(0),
-              entries: [
-                { binding: 0, resource: sourceTexture },
-                { binding: 1, resource: outputTexture.createView() },
-              ],
-            });
-
-            const commandEncoder = gpuDevice.createCommandEncoder();
-            const passEncoder = commandEncoder.beginComputePass();
-            passEncoder.setPipeline(computePipeline);
-            passEncoder.setBindGroup(0, bindGroup);
-            const workgroupsX = Math.ceil(width / 16);
-            const workgroupsY = Math.ceil(height / 16);
-            passEncoder.dispatchWorkgroups(workgroupsX, workgroupsY);
-            passEncoder.end();
-
-            gpuDevice.queue.submit([commandEncoder.finish()]);
-
-            frame = new VideoFrame(canvas, {
-              timestamp: timestampMicros,
-              duration: durationMicros,
-            });
-            rawFrame.close();
-          } else if (ctx) {
-            // 2D CANVAS PIPELINE
+          } else if (ctx && canvas) {
             ctx.drawImage(video, 0, 0, width, height);
             frame = new VideoFrame(canvas, {
               timestamp: timestampMicros,
               duration: durationMicros,
             });
           } else {
-             throw new Error('No rendering context available');
+            throw new Error('No frame source available');
           }
 
-          const keyFrame = frameIndex % (framerate * 2) === 0;
+          const keyFrame = frameIndex % Math.max(1, Math.round(framerate * 2)) === 0;
           encoder.encode(frame, { keyFrame });
           frame.close();
 
           encodedFramesCount++;
           frameIndex++;
 
-          // Telemetry
-          if (options.onProgress) {
-            const elapsed = (Date.now() - startTime) / 1000;
+          // Throttled UI telemetry (10 Hz) so mobile compositor never stalls
+          const now = Date.now();
+          if (options.onProgress && now - lastProgressAt >= 100) {
+            lastProgressAt = now;
+            const elapsed = (now - startTime) / 1000;
             const currentFps = elapsed > 0 ? Math.round(encodedFramesCount / elapsed) : 0;
             const percent = Math.min(99.5, (targetTime / duration) * 100);
             options.onProgress({
@@ -467,11 +423,10 @@ export async function transcodeWithHardwareWebCodecs(
             });
           }
 
-          // Allow event loop to process
-          requestAnimationFrame(stepThrough);
+          // Schedule next frame immediately without VSync 60fps cap
+          setTimeout(stepThrough, 0);
         };
 
-        // Start frame capture loop
         stepThrough();
       } catch (err) {
         cleanup();
