@@ -921,6 +921,16 @@ export default function App() {
         config.container === 'mov' ||
         config.container === 'mkv' ||
         config.container === 'webm';
+      const isWebCodecsTargetCodec =
+        config.videoCodec === 'av01' ||
+        config.videoCodec === 'libx264' ||
+        config.videoCodec === 'libx265';
+      const isDirectWebCodecsContainerForCodec =
+        config.videoCodec === 'av01'
+          ? isAv1MuxContainer
+          : config.container === 'mp4' ||
+            config.container === 'mov' ||
+            config.container === 'mkv';
 
       if (isTargetAv1 && !isAv1MuxContainer) {
         throw new Error(
@@ -932,11 +942,12 @@ export default function App() {
         rawFile.size <= hwMaxBytes &&
         isVideoTarget &&
         !isCopy &&
+        isWebCodecsTargetCodec &&
         ((isTargetAv1 &&
           isAv1MuxContainer &&
           Boolean(hardwareCaps?.webcodecs.av1Available || hardwareCaps?.webcodecs.available)) ||
           (isSourceAv1 &&
-            isAv1MuxContainer &&
+            isDirectWebCodecsContainerForCodec &&
             Boolean(hardwareCaps?.webcodecs.available)) ||
           (isHwContainer &&
             config.hardwareAcceleration !== false &&
@@ -1065,7 +1076,7 @@ export default function App() {
         }
 
         // Fallback B: If stream copy still failed (e.g. VP8/VP9/WMV video inside MP4), automatically transcode video + audio
-        if (returnCode !== 0) {
+        if (returnCode !== 0 && !isSourceAv1) {
           const fallbackVideoCodec = config.container === 'webm' ? 'libvpx-vp9' : 'libx264';
           const fallbackAudioCodec =
             config.audioCodec === 'none'
@@ -1100,7 +1111,9 @@ export default function App() {
 
         if (returnCode !== 0) {
           throw new Error(
-            `Conversion exited with code ${returnCode}. Check console logs for stream details.`
+            isSourceAv1
+              ? `AV1 (av01) stream copy into .${config.container.toUpperCase()} failed. Switch mode to Compress (GPU) or AV1 (av01) to convert.`
+              : `Conversion exited with code ${returnCode}. Check console logs for stream details.`
           );
         }
 
@@ -1128,12 +1141,12 @@ export default function App() {
           ...prev,
           accelerationMode: gpuEngineLabel,
         }));
-        addLog('system', `Initializing WebCodecs compression pipeline (${gpuEngineLabel})...`);
+        addLog('system', `Initializing WebCodecs pipeline (${gpuEngineLabel})...`);
 
         let sourceBlobForHw: Blob = rawFile;
         const lowerExtIn = extIn.toLowerCase();
-        if (['.mkv', '.avi', '.flv', '.ts', '.m2ts', '.mts', '.ivf', '.av1', '.obu'].includes(lowerExtIn)) {
-          addLog('system', 'Pre-flight stream remuxing for browser video decoder...');
+        if (['.webm', '.mkv', '.avi', '.flv', '.ts', '.m2ts', '.mts', '.ivf', '.av1', '.obu'].includes(lowerExtIn)) {
+          addLog('system', 'Pre-flight stream remuxing into MP4 sample table for zero-seek WebCodecs VideoDecoder...');
           const tempRemuxOut = `temp_hw_remux_${Date.now()}.mp4`;
           const remuxArgs = [
             '-hide_banner',
@@ -1218,6 +1231,7 @@ export default function App() {
             resolution: config.resolution,
             bitrate: bitrateBps,
             framerate: targetFramerate,
+            preserveSourceFramerate: config.framerate === 'source',
             preferredCodec: preferredHwCodec,
             preferHardware: config.hardwareAcceleration !== false,
             fastStart: !needsFinalMux && useZeroCopyFastStart,
@@ -1397,6 +1411,7 @@ export default function App() {
 
           executedCommand = [
             hwResult.isHardware ? 'webcodecs-gpu' : 'webcodecs',
+            `--decode=${hwResult.decodeMode}`,
             `--codec=${hwResult.codecUsed}`,
             `--container=${config.container}`,
             `--resolution=${hwResult.width}x${hwResult.height}`,
@@ -1405,12 +1420,12 @@ export default function App() {
           ];
           addLog(
             'system',
-            `WebCodecs compression finished (${hwResult.codecUsed}, ${hwResult.width}x${hwResult.height}, ${(
+            `WebCodecs conversion finished (${hwResult.codecUsed}, ${hwResult.width}x${hwResult.height}, ${(
               hwResult.bitrateBps / 1_000_000
-            ).toFixed(2)} Mbps, ${hwResult.isHardware ? 'Hardware GPU' : 'WebCodecs'}).`
+            ).toFixed(2)} Mbps, ${hwResult.decodeMode === 'webcodecs-sequential' ? 'Zero-Seek VideoDecoder' : 'Media Element'}).`
           );
         } catch (hwErr: any) {
-          if (hwAbortController.current?.signal.aborted || isTargetAv1) {
+          if (hwAbortController.current?.signal.aborted || isTargetAv1 || isSourceAv1) {
             throw hwErr;
           }
           addLog(
@@ -1437,75 +1452,258 @@ export default function App() {
           outputBlob = await readOutputAsBlob(virtualOut, mimeType, useZeroCopyFastStart);
         }
       } else {
-        // MULTI-THREADED CPU WASM (Video or Audio conversion)
-        setTelemetry((prev) => ({
-          ...prev,
-          accelerationMode: 'CPU Wasm',
-        }));
-        probeLogsBuffer.current = [];
-        executedCommand = buildFFmpegArgs(virtualIn, virtualOut, config, effectiveMeta, execBuildOptions);
-        addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
-        let returnCode = await ffmpeg.exec(executedCommand);
+        // MULTI-THREADED CPU WASM (with automatic WebCodecs decode bridge for AV1 av01 -> GIF / AVI / VP9)
+        const needsAv1DecodeBridge =
+          isSourceAv1 &&
+          config.targetCategory === 'video' &&
+          config.videoCodec !== 'copy' &&
+          rawFile.size <= hwMaxBytes &&
+          Boolean(hardwareCaps?.webcodecs.available);
 
-        // If explicit -map specifier failed to resolve, retry with safe container auto stream mapping
-        const cpuMapErr = probeLogsBuffer.current.slice(-40).join('\n').toLowerCase();
-        if (returnCode !== 0 && cpuMapErr.includes('matches no streams')) {
-          addLog('system', 'Explicit track index mismatch detected; retrying with container auto stream mapping...');
-          try { await ffmpeg.deleteFile(virtualOut); } catch {}
+        if (needsAv1DecodeBridge) {
+          addLog(
+            'system',
+            `AV1 (av01) source detected for .${config.container.toUpperCase()} export. Decoding AV1 via WebCodecs bridge before FFmpeg encode...`
+          );
+          setTelemetry((prev) => ({
+            ...prev,
+            accelerationMode: 'WebCodecs AV1 Decode Bridge + FFmpeg',
+          }));
+
+          let bridgeSourceBlob: Blob = rawFile;
+          const lowerExtIn = extIn.toLowerCase();
+          if (['.webm', '.mkv', '.avi', '.flv', '.ts', '.m2ts', '.mts', '.ivf', '.av1', '.obu'].includes(lowerExtIn)) {
+            const tempRemuxOut = `temp_av1_bridge_remux_${Date.now()}.mp4`;
+            const remuxCode = await ffmpeg.exec([
+              '-hide_banner',
+              '-nostdin',
+              '-threads',
+              '1',
+              '-fflags',
+              '+genpts',
+              '-i',
+              virtualIn,
+              '-c:v',
+              'copy',
+              '-tag:v',
+              'av01',
+              '-an',
+              '-sn',
+              '-dn',
+              tempRemuxOut,
+            ]);
+            if (remuxCode === 0) {
+              bridgeSourceBlob = await readOutputAsBlob(tempRemuxOut, 'video/mp4', true);
+              try { await ffmpeg.deleteFile(tempRemuxOut); } catch {}
+            }
+          }
+
+          hwAbortController.current = new AbortController();
+          const bridgeFps =
+            config.framerate !== 'source'
+              ? Number(config.framerate)
+              : config.container === 'gif'
+              ? 24
+              : effectiveMeta.fps && effectiveMeta.fps >= 15 && effectiveMeta.fps <= 60
+              ? Math.round(effectiveMeta.fps)
+              : 30;
+          const bridgeResult = await transcodeWithHardwareWebCodecs(bridgeSourceBlob, {
+            resolution: config.resolution,
+            bitrate: config.container === 'gif' ? 6_000_000 : 10_000_000,
+            framerate: bridgeFps,
+            preserveSourceFramerate: config.container !== 'gif' && config.framerate === 'source',
+            preferredCodec: 'avc',
+            preferHardware: true,
+            fastStart: false,
+            signal: hwAbortController.current.signal,
+            onProgress: (p) => {
+              const elapsed = Date.now() - startTimeRef.current;
+              setTelemetry((prev) => ({
+                ...prev,
+                percent: Math.min(55, p.percent * 0.55),
+                currentTime: p.currentTime,
+                duration: p.duration,
+                fps: p.fps,
+                speed: `${p.fps} fps (AV1 Decode)`,
+                elapsedMs: elapsed,
+                accelerationMode: 'WebCodecs AV1 Decode Bridge',
+              }));
+            },
+          });
+
+          const bridgeMountDir = `/av1_bridge_${Date.now()}`;
+          const bridgeVideoName = `av1_bridge_${Date.now()}.mp4`;
+          const bridgeVirtualPath = `${bridgeMountDir}/${bridgeVideoName}`;
+          await ffmpeg.createDir(bridgeMountDir);
+          await ffmpeg.mount(
+            'WORKERFS' as any,
+            { blobs: [{ name: bridgeVideoName, data: bridgeResult.blob }] },
+            bridgeMountDir
+          );
+
+          try {
+            probeLogsBuffer.current = [];
+            if (config.container === 'gif') {
+              executedCommand = buildFFmpegArgs(
+                bridgeVirtualPath,
+                virtualOut,
+                config,
+                {
+                  ...effectiveMeta,
+                  videoCodec: 'h264',
+                  hasAudio: false,
+                  audioTracks: [],
+                  subtitleTracks: [],
+                },
+                execBuildOptions
+              );
+            } else {
+              const args: string[] = [
+                '-hide_banner',
+                '-nostdin',
+                '-threads',
+                '0',
+                '-i',
+                bridgeVirtualPath,
+              ];
+              const includeAudio = config.audioCodec !== 'none' && effectiveMeta.hasAudio;
+              if (includeAudio) {
+                args.push('-i', virtualIn, '-map', '0:v:0', '-map', '1:a:0?');
+              } else {
+                args.push('-map', '0:v:0');
+              }
+
+              if (config.container === 'webm') {
+                args.push(
+                  '-c:v',
+                  'libvpx-vp9',
+                  '-crf',
+                  String(config.crf || 30),
+                  '-b:v',
+                  '0',
+                  '-deadline',
+                  'realtime',
+                  '-cpu-used',
+                  '5',
+                  '-row-mt',
+                  '1'
+                );
+              } else {
+                args.push(
+                  '-c:v',
+                  config.videoCodec === 'libx265' ? 'libx265' : 'libx264',
+                  '-preset',
+                  config.speedPreset || 'ultrafast',
+                  '-crf',
+                  String(config.crf || 23),
+                  '-pix_fmt',
+                  'yuv420p'
+                );
+              }
+
+              if (!includeAudio) {
+                args.push('-an');
+              } else if (config.container === 'webm') {
+                args.push(
+                  '-c:a',
+                  'libopus',
+                  '-b:a',
+                  config.audioBitrate === 'lossless' ? '192k' : config.audioBitrate
+                );
+              } else {
+                args.push(
+                  '-c:a',
+                  config.audioCodec === 'libmp3lame' ? 'libmp3lame' : 'aac',
+                  '-b:a',
+                  config.audioBitrate === 'lossless' ? '192k' : config.audioBitrate
+                );
+              }
+
+              args.push('-sn', '-dn', '-shortest', virtualOut);
+              executedCommand = args;
+            }
+
+            addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
+            const bridgeCode = await ffmpeg.exec(executedCommand);
+            if (bridgeCode !== 0) {
+              throw new Error(`FFmpeg AV1 bridge conversion returned exit code ${bridgeCode}.`);
+            }
+            const mimeType = getMimeType(config.container);
+            outputBlob = await readOutputAsBlob(virtualOut, mimeType, useZeroCopyFastStart);
+          } finally {
+            try { await ffmpeg.unmount(bridgeMountDir); } catch {}
+            try { await ffmpeg.deleteDir(bridgeMountDir); } catch {}
+          }
+        } else {
+          setTelemetry((prev) => ({
+            ...prev,
+            accelerationMode: 'CPU Wasm',
+          }));
           probeLogsBuffer.current = [];
-          executedCommand = buildFFmpegArgs(
-            virtualIn,
-            virtualOut,
-            {
-              ...config,
-              selectedVideoTrackIndices: undefined,
-              selectedAudioTrackIndices: undefined,
-              selectedSubtitleTrackIndices: [],
-              subtitleMode: 'drop',
-            },
-            {
-              ...effectiveMeta,
-              videoTracks: undefined,
-              audioTracks: undefined,
-              subtitleTracks: undefined,
-            },
-            execBuildOptions
-          );
+          executedCommand = buildFFmpegArgs(virtualIn, virtualOut, config, effectiveMeta, execBuildOptions);
           addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
-          returnCode = await ffmpeg.exec(executedCommand);
-        }
+          let returnCode = await ffmpeg.exec(executedCommand);
 
-        // If audio stream copy failed during audio extraction or video encode, retry with native container audio codec
-        if (returnCode !== 0 && config.audioCodec === 'copy') {
-          const fallbackAudio =
-            config.container === 'mp3'
-              ? 'libmp3lame'
-              : config.container === 'ogg' || config.container === 'webm'
-              ? 'libopus'
-              : config.container === 'wav'
-              ? 'pcm_s16le'
-              : config.container === 'flac'
-              ? 'flac'
-              : 'aac';
-          addLog('system', `Audio stream copy incompatible with .${config.container}. Retrying with ${fallbackAudio} encoder...`);
-          try { await ffmpeg.deleteFile(virtualOut); } catch {}
-          executedCommand = buildFFmpegArgs(
-            virtualIn,
-            virtualOut,
-            { ...config, audioCodec: fallbackAudio as any },
-            effectiveMeta,
-            execBuildOptions
-          );
-          returnCode = await ffmpeg.exec(executedCommand);
-        }
+          // If explicit -map specifier failed to resolve, retry with safe container auto stream mapping
+          const cpuMapErr = probeLogsBuffer.current.slice(-40).join('\n').toLowerCase();
+          if (returnCode !== 0 && cpuMapErr.includes('matches no streams')) {
+            addLog('system', 'Explicit track index mismatch detected; retrying with container auto stream mapping...');
+            try { await ffmpeg.deleteFile(virtualOut); } catch {}
+            probeLogsBuffer.current = [];
+            executedCommand = buildFFmpegArgs(
+              virtualIn,
+              virtualOut,
+              {
+                ...config,
+                selectedVideoTrackIndices: undefined,
+                selectedAudioTrackIndices: undefined,
+                selectedSubtitleTrackIndices: [],
+                subtitleMode: 'drop',
+              },
+              {
+                ...effectiveMeta,
+                videoTracks: undefined,
+                audioTracks: undefined,
+                subtitleTracks: undefined,
+              },
+              execBuildOptions
+            );
+            addLog('system', `Executing: ffmpeg ${executedCommand.join(' ')}`);
+            returnCode = await ffmpeg.exec(executedCommand);
+          }
 
-        if (returnCode !== 0) {
-          throw new Error(
-            `FFmpeg conversion returned exit code ${returnCode}. Check console logs for codec details.`
-          );
+          // If audio stream copy failed during audio extraction or video encode, retry with native container audio codec
+          if (returnCode !== 0 && config.audioCodec === 'copy') {
+            const fallbackAudio =
+              config.container === 'mp3'
+                ? 'libmp3lame'
+                : config.container === 'ogg' || config.container === 'webm'
+                ? 'libopus'
+                : config.container === 'wav'
+                ? 'pcm_s16le'
+                : config.container === 'flac'
+                ? 'flac'
+                : 'aac';
+            addLog('system', `Audio stream copy incompatible with .${config.container}. Retrying with ${fallbackAudio} encoder...`);
+            try { await ffmpeg.deleteFile(virtualOut); } catch {}
+            executedCommand = buildFFmpegArgs(
+              virtualIn,
+              virtualOut,
+              { ...config, audioCodec: fallbackAudio as any },
+              effectiveMeta,
+              execBuildOptions
+            );
+            returnCode = await ffmpeg.exec(executedCommand);
+          }
+
+          if (returnCode !== 0) {
+            throw new Error(
+              `FFmpeg conversion returned exit code ${returnCode}. Check console logs for codec details.`
+            );
+          }
+          const mimeType = getMimeType(config.container);
+          outputBlob = await readOutputAsBlob(virtualOut, mimeType, useZeroCopyFastStart);
         }
-        const mimeType = getMimeType(config.container);
-        outputBlob = await readOutputAsBlob(virtualOut, mimeType, useZeroCopyFastStart);
       }
 
       // Unmount WORKERFS input stream immediately
@@ -1529,6 +1727,8 @@ export default function App() {
       const baseName = sourceMeta.name.replace(/\.[^/.]+$/, '');
       const outputSuffix = isCopy
         ? '_remuxed'
+        : isTargetAv1
+        ? '_av1'
         : isVideoTarget
         ? '_compressed'
         : '_converted';
@@ -1778,6 +1978,8 @@ export default function App() {
                               {config.targetCategory === 'video' && config.container !== 'gif'
                                 ? config.videoCodec === 'copy'
                                   ? `Remux to .${config.container.toUpperCase()}`
+                                  : config.videoCodec === 'av01'
+                                  ? `Convert to AV1 (.${config.container.toUpperCase()})`
                                   : `Compress to .${config.container.toUpperCase()}`
                                 : `Convert to .${config.container.toUpperCase()}`}
                             </span>
@@ -1906,6 +2108,8 @@ export default function App() {
                             {config.targetCategory === 'video' && config.container !== 'gif'
                               ? config.videoCodec === 'copy'
                                 ? `Remux to .${config.container.toUpperCase()}`
+                                : config.videoCodec === 'av01'
+                                ? `Convert to AV1 (.${config.container.toUpperCase()})`
                                 : `Compress to .${config.container.toUpperCase()}`
                               : `Convert to .${config.container.toUpperCase()}`}
                           </span>

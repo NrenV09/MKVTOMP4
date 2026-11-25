@@ -81,6 +81,11 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
   const isRemuxMode = isVideoMode && config.videoCodec === 'copy';
   const isCompressMode = isVideoMode && config.videoCodec !== 'copy';
   const isAv1Selected = config.videoCodec === 'av01';
+  const isSourceAv1 = Boolean(
+    source?.videoCodec &&
+      (source.videoCodec.toLowerCase().includes('av1') ||
+        source.videoCodec.toLowerCase().includes('av01'))
+  );
   const isHwContainer = config.container === 'mp4' || config.container === 'mov';
   const isAv1Container =
     config.container === 'mp4' ||
@@ -124,10 +129,12 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
     preset: CompressionPreset,
     overrideCodec?: VideoCodec
   ) => {
-    const targetContainer: VideoContainer =
+    const rawContainer: VideoContainer =
       config.targetCategory === 'video' && config.container !== 'gif'
         ? (config.container as VideoContainer)
         : 'mp4';
+    const targetContainer: VideoContainer =
+      overrideCodec === 'av01' && rawContainer === 'avi' ? 'mp4' : rawContainer;
 
     const nextCodec: VideoCodec =
       overrideCodec ||
@@ -243,13 +250,15 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
         hardwareEngine: 'stream-copy',
       });
     } else if (presetName === 'compress') {
-      applyCompressionPreset(config.compressionPreset || 'balanced');
+      const nextCodec: VideoCodec =
+        config.videoCodec === 'libx265' ? 'libx265' : 'libx264';
+      applyCompressionPreset(config.compressionPreset || 'balanced', nextCodec);
     } else if (presetName === 'web-h264') {
       applyCompressionPreset('balanced', 'libx264');
     } else if (presetName === 'hevc') {
       applyCompressionPreset('balanced', 'libx265');
     } else if (presetName === 'av01') {
-      applyCompressionPreset('balanced', 'av01');
+      applyCompressionPreset(config.compressionPreset || 'balanced', 'av01');
     } else if (presetName === 'webm-vp9') {
       const keepAv1 = config.videoCodec === 'av01' && canUseAv1WebCodecs;
       updateConfig({
@@ -381,7 +390,7 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
             )}
             {isCompressMode && (
               <span className="ml-1.5 text-cyan-400 font-bold">
-                ({isHardwareActive ? 'GPU Compress' : 'CPU Compress'})
+                ({isAv1Selected ? 'AV1 av01' : isHardwareActive ? 'GPU Compress' : 'CPU Compress'})
               </span>
             )}
           </div>
@@ -398,17 +407,17 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
       {/* SIMPLE MODE */}
       {mode === 'simple' && (
         <div className="cyber-panel rounded-xl p-4 sm:p-5 space-y-5">
-          {/* 1. Primary Workflow: Remux vs Compress (for Video files) */}
+          {/* 1. Primary Workflow: Remux vs Compress vs AV1 (for Video files) */}
           {source?.hasVideo !== false && (
-            <div>
-              <label className="text-xs font-mono text-zinc-300 font-semibold block mb-2.5">
+            <div className="space-y-2.5">
+              <label className="text-xs font-mono text-zinc-300 font-semibold block">
                 1. Mode
               </label>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 font-mono">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 font-mono">
                 <button
                   type="button"
                   onClick={() => applyPreset('remux')}
-                  className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer flex items-start justify-between gap-3 ${
+                  className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer flex items-start justify-between gap-2.5 ${
                     isRemuxMode
                       ? 'bg-emerald-500/10 border-emerald-500/60 ring-1 ring-emerald-500/30 text-zinc-100'
                       : 'bg-zinc-950/60 border-zinc-800/80 hover:border-zinc-700 text-zinc-300'
@@ -425,11 +434,9 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                       <Copy className="w-4 h-4" />
                     </div>
                     <div>
-                      <div className="text-xs font-bold text-zinc-100 flex items-center gap-2">
-                        <span>Remux (Stream Copy)</span>
-                      </div>
+                      <div className="text-xs font-bold text-zinc-100">Remux (Copy)</div>
                       <div className="text-[11px] text-zinc-400 mt-0.5">
-                        Fastest container swap, original quality
+                        Instant swap, original quality
                       </div>
                     </div>
                   </div>
@@ -439,8 +446,8 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                 <button
                   type="button"
                   onClick={() => applyPreset('compress')}
-                  className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer flex items-start justify-between gap-3 ${
-                    isCompressMode
+                  className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer flex items-start justify-between gap-2.5 ${
+                    isCompressMode && !isAv1Selected
                       ? 'bg-cyan-500/10 border-cyan-500/60 ring-1 ring-cyan-500/30 text-zinc-100'
                       : 'bg-zinc-950/60 border-zinc-800/80 hover:border-zinc-700 text-zinc-300'
                   }`}
@@ -448,7 +455,7 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                   <div className="flex items-start gap-2.5">
                     <div
                       className={`p-2 rounded-lg border shrink-0 ${
-                        isCompressMode
+                        isCompressMode && !isAv1Selected
                           ? 'bg-cyan-500/15 border-cyan-500/40 text-cyan-300'
                           : 'bg-zinc-900 border-zinc-800 text-zinc-400'
                       }`}
@@ -457,7 +464,7 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                     </div>
                     <div>
                       <div className="text-xs font-bold text-zinc-100 flex items-center gap-1.5 flex-wrap">
-                        <span>Compress Video</span>
+                        <span>Compress</span>
                         {canUseHardwareGpu && (
                           <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 border border-cyan-500/40 text-[10px] text-cyan-300 flex items-center gap-1">
                             <Zap className="w-2.5 h-2.5" />
@@ -466,13 +473,90 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                         )}
                       </div>
                       <div className="text-[11px] text-zinc-400 mt-0.5">
-                        Reduce file size with hardware acceleration
+                        Smaller H.264 / HEVC video
                       </div>
                     </div>
                   </div>
-                  {isCompressMode && <Check className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />}
+                  {isCompressMode && !isAv1Selected && (
+                    <Check className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => applyPreset('av01')}
+                  className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer flex items-start justify-between gap-2.5 ${
+                    isCompressMode && isAv1Selected
+                      ? 'bg-emerald-500/10 border-emerald-400/60 ring-1 ring-emerald-400/30 text-zinc-100'
+                      : 'bg-zinc-950/60 border-zinc-800/80 hover:border-zinc-700 text-zinc-300'
+                  }`}
+                >
+                  <div className="flex items-start gap-2.5">
+                    <div
+                      className={`p-2 rounded-lg border shrink-0 ${
+                        isCompressMode && isAv1Selected
+                          ? 'bg-emerald-500/15 border-emerald-400/40 text-emerald-300'
+                          : 'bg-zinc-900 border-zinc-800 text-zinc-400'
+                      }`}
+                    >
+                      <Film className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <div className="text-xs font-bold text-zinc-100 flex items-center gap-1.5 flex-wrap">
+                        <span>AV1 (av01)</span>
+                        {hardwareCaps?.webcodecs.hwAV1 && (
+                          <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/40 text-[10px] text-emerald-300 flex items-center gap-1">
+                            <Zap className="w-2.5 h-2.5" />
+                            <span>GPU</span>
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-zinc-400 mt-0.5">
+                        Smallest size, modern AV1
+                      </div>
+                    </div>
+                  </div>
+                  {isCompressMode && isAv1Selected && (
+                    <Check className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                  )}
                 </button>
               </div>
+
+              {isSourceAv1 && (
+                <div className="p-3 rounded-xl bg-cyan-950/30 border border-cyan-500/35 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 font-mono">
+                  <div className="text-xs text-cyan-100">
+                    <span className="font-bold text-cyan-300">AV1 (av01) source detected</span>
+                    <span className="text-zinc-400 ml-1.5 text-[11px]">
+                      — convert for universal playback or remux container.
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateConfig({
+                          targetCategory: 'video',
+                          container: 'mp4',
+                          videoCodec: 'libx264',
+                          compressionPreset: 'balanced',
+                          rateControl: 'crf',
+                          crf: 23,
+                          resolution: 'source',
+                          framerate: 'source',
+                          audioCodec: 'aac',
+                          audioBitrate: '192k',
+                          fastStart: true,
+                          hardwareAcceleration: canUseHardwareGpu,
+                          hardwareEngine: canUseHardwareGpu ? 'webgpu' : 'cpu',
+                        })
+                      }
+                      className="px-2.5 py-1.5 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-400/50 text-cyan-200 text-[11px] font-bold transition-colors cursor-pointer"
+                    >
+                      AV1 → H.264 MP4
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -1236,12 +1320,13 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                       type="button"
                       onClick={() => {
                         if (fmt === 'webm') {
+                          const keepAv1 = config.videoCodec === 'av01' && canUseAv1WebCodecs;
                           updateConfig({
                             container: fmt,
-                            videoCodec: 'libvpx-vp9',
+                            videoCodec: keepAv1 ? 'av01' : 'libvpx-vp9',
                             audioCodec: 'libopus',
-                            hardwareAcceleration: false,
-                            hardwareEngine: 'cpu',
+                            hardwareAcceleration: keepAv1,
+                            hardwareEngine: keepAv1 ? 'webgpu' : 'cpu',
                           });
                         } else if (fmt === 'gif') {
                           updateConfig({
