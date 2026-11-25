@@ -28,6 +28,8 @@ export interface WebCodecsInfo {
   hwHEVC: boolean;
   hwVP9: boolean;
   hwAV1: boolean;
+  swAV1: boolean;
+  av1Available: boolean;
 }
 
 export interface HardwareCapabilities {
@@ -47,6 +49,8 @@ export interface HardwareEncodeResult {
   blob: Blob;
   codecUsed: string;
   isHevc: boolean;
+  isAv1: boolean;
+  isHardware: boolean;
   width: number;
   height: number;
   bitrateBps: number;
@@ -189,7 +193,9 @@ export function computeTargetVideoBitrateBps(
   const crf = Math.min(34, Math.max(16, config.crf || 23));
   const crfFactor = Math.pow(2, (23 - crf) / 6);
   const codecFactor =
-    config.videoCodec === 'libx265'
+    config.videoCodec === 'av01'
+      ? 0.58
+      : config.videoCodec === 'libx265'
       ? 0.68
       : config.videoCodec === 'libvpx-vp9'
       ? 0.72
@@ -383,13 +389,15 @@ export async function detectHardwareCapabilities(): Promise<HardwareCapabilities
     }
   }
 
-  // 2. WebCodecs Probing (with prefer-hardware)
+  // 2. WebCodecs Probing (with prefer-hardware + AV1 WebCodecs software fallback check)
   const webcodecs: WebCodecsInfo = {
     available: typeof window !== 'undefined' && 'VideoEncoder' in window && 'VideoDecoder' in window,
     hwH264: false,
     hwHEVC: false,
     hwVP9: false,
     hwAV1: false,
+    swAV1: false,
+    av1Available: false,
   };
 
   if (webcodecs.available && typeof VideoEncoder.isConfigSupported === 'function') {
@@ -442,24 +450,51 @@ export async function detectHardwareCapabilities(): Promise<HardwareCapabilities
       if (vp9Res.supported) webcodecs.hwVP9 = true;
     } catch {}
 
-    // Check AV1
-    try {
-      const av1Res = await VideoEncoder.isConfigSupported({
-        codec: 'av01.0.08M.08',
-        width: 1280,
-        height: 720,
-        bitrate: 2_500_000,
-        framerate: 30,
-        hardwareAcceleration: 'prefer-hardware',
-      });
-      if (av1Res.supported) webcodecs.hwAV1 = true;
-    } catch {}
+    // Check AV1 (av01) hardware encoding first (Snapdragon 8 Gen 3+, Dimensity 9300+, M3+, RTX 40+, Arc)
+    const av1Profiles = ['av01.0.08M.08', 'av01.0.05M.08', 'av01.0.04M.08'];
+    for (const av1Profile of av1Profiles) {
+      try {
+        const av1Hw = await VideoEncoder.isConfigSupported({
+          codec: av1Profile,
+          width: 1280,
+          height: 720,
+          bitrate: 2_000_000,
+          framerate: 30,
+          hardwareAcceleration: 'prefer-hardware',
+        });
+        if (av1Hw.supported) {
+          webcodecs.hwAV1 = true;
+          break;
+        }
+      } catch {}
+    }
+
+    // Also check built-in browser WebCodecs AV1 (av01) software encoding (Chrome/Edge/Firefox)
+    for (const av1Profile of av1Profiles) {
+      try {
+        const av1Sw = await VideoEncoder.isConfigSupported({
+          codec: av1Profile,
+          width: 1280,
+          height: 720,
+          bitrate: 2_000_000,
+          framerate: 30,
+          hardwareAcceleration: 'no-preference',
+        });
+        if (av1Sw.supported) {
+          webcodecs.swAV1 = true;
+          break;
+        }
+      } catch {}
+    }
+
+    webcodecs.av1Available = webcodecs.hwAV1 || webcodecs.swAV1;
   }
 
   const result: HardwareCapabilities = {
     webgpu,
     webcodecs,
-    hardwareAccelerationSupported: webgpu.available || webcodecs.hwH264 || webcodecs.hwHEVC,
+    hardwareAccelerationSupported:
+      webgpu.available || webcodecs.hwH264 || webcodecs.hwHEVC || webcodecs.hwAV1,
   };
 
   cachedCapabilities = result;
@@ -483,7 +518,8 @@ export async function transcodeWithHardwareWebCodecs(
     targetHeight?: number;
     bitrate?: number; // in bps, e.g. 2_500_000 for 2.5 Mbps
     framerate?: number;
-    preferredCodec?: 'avc' | 'hevc';
+    preferredCodec?: 'avc' | 'hevc' | 'av01';
+    preferHardware?: boolean;
     codec?: string;
     fastStart?: boolean;
     webgpuFilter?: 'none' | 'grayscale';
@@ -570,19 +606,27 @@ export async function transcodeWithHardwareWebCodecs(
           Math.max(180_000, options.bitrate || Math.round(width * height * framerate * 0.06))
         );
 
-        // Pick the highest H.265/HEVC or H.264 hardware profile accepted by Snapdragon/MediaTek/Apple/Desktop GPU
-        const h264Candidates = ['avc1.640033', 'avc1.64002a', 'avc1.4d0029', 'avc1.42001f'];
+        // Pick the highest AV1 / HEVC / H.264 profile accepted by Snapdragon / MediaTek / Apple / Desktop GPU
+        const av1Candidates =
+          width * height >= 2560 * 1440
+            ? ['av01.0.12M.08', 'av01.0.08M.08', 'av01.0.05M.08', 'av01.0.04M.08']
+            : ['av01.0.08M.08', 'av01.0.05M.08', 'av01.0.04M.08'];
         const hevcCandidates = ['hvc1.1.6.L120.90', 'hev1.1.6.L120.90'];
+        const h264Candidates = ['avc1.640033', 'avc1.64002a', 'avc1.4d0029', 'avc1.42001f'];
 
-        const candidateCodecs: string[] = options.codec
-          ? [options.codec, ...h264Candidates]
-          : options.preferredCodec === 'hevc'
-          ? [...hevcCandidates, ...h264Candidates]
-          : h264Candidates;
-
+        const wantHw = options.preferHardware !== false;
         let selectedCodec: string | null = null;
-        if (typeof VideoEncoder.isConfigSupported === 'function') {
-          for (const candidate of candidateCodecs) {
+        let selectedAccel: HardwareAcceleration = wantHw ? 'prefer-hardware' : 'no-preference';
+        let isHardware = wantHw;
+
+        const probeCandidates = async (
+          candidates: string[],
+          accel: HardwareAcceleration
+        ): Promise<string | null> => {
+          if (typeof VideoEncoder.isConfigSupported !== 'function') {
+            return candidates[0] || null;
+          }
+          for (const candidate of candidates) {
             try {
               const support = await VideoEncoder.isConfigSupported({
                 codec: candidate,
@@ -590,23 +634,64 @@ export async function transcodeWithHardwareWebCodecs(
                 height,
                 bitrate,
                 framerate,
-                hardwareAcceleration: 'prefer-hardware',
+                hardwareAcceleration: accel,
               });
-              if (support.supported) {
-                selectedCodec = candidate;
-                break;
-              }
+              if (support.supported) return candidate;
             } catch {}
           }
+          return null;
+        };
+
+        if (options.codec) {
+          selectedCodec = await probeCandidates([options.codec], selectedAccel);
+          if (!selectedCodec && selectedAccel === 'prefer-hardware') {
+            selectedAccel = 'no-preference';
+            isHardware = false;
+            selectedCodec = await probeCandidates([options.codec], selectedAccel);
+          }
+        } else if (options.preferredCodec === 'av01') {
+          // For AV1 (av01): try hardware silicon first, then browser's built-in WebCodecs AV1 encoder
+          if (wantHw) {
+            selectedCodec = await probeCandidates(av1Candidates, 'prefer-hardware');
+            if (selectedCodec) {
+              selectedAccel = 'prefer-hardware';
+              isHardware = true;
+            }
+          }
+          if (!selectedCodec) {
+            selectedCodec = await probeCandidates(av1Candidates, 'no-preference');
+            if (selectedCodec) {
+              selectedAccel = 'no-preference';
+              isHardware = false;
+            }
+          }
+        } else if (options.preferredCodec === 'hevc') {
+          selectedCodec = await probeCandidates([...hevcCandidates, ...h264Candidates], selectedAccel);
+          if (!selectedCodec && selectedAccel === 'prefer-hardware') {
+            selectedAccel = 'no-preference';
+            isHardware = false;
+            selectedCodec = await probeCandidates([...hevcCandidates, ...h264Candidates], selectedAccel);
+          }
         } else {
-          selectedCodec = candidateCodecs[0];
+          selectedCodec = await probeCandidates(h264Candidates, selectedAccel);
+          if (!selectedCodec && selectedAccel === 'prefer-hardware') {
+            selectedAccel = 'no-preference';
+            isHardware = false;
+            selectedCodec = await probeCandidates(h264Candidates, selectedAccel);
+          }
         }
 
         if (!selectedCodec) {
-          throw new Error('No supported hardware VideoEncoder profile found for target resolution/codec.');
+          throw new Error(
+            options.preferredCodec === 'av01'
+              ? 'This browser does not support WebCodecs AV1 (av01) encoding.'
+              : 'No supported hardware VideoEncoder profile found for target resolution/codec.'
+          );
         }
 
+        const isAv1 = selectedCodec.startsWith('av01');
         const isHevc = selectedCodec.startsWith('hvc1') || selectedCodec.startsWith('hev1');
+        const muxerVideoCodec: 'av1' | 'hevc' | 'avc' = isAv1 ? 'av1' : isHevc ? 'hevc' : 'avc';
 
         // Paged 4 MB StreamTarget keeps peak RAM low on Snapdragon/MediaTek phones
         const pagedWriter = new PagedBlobWriter();
@@ -619,7 +704,7 @@ export async function transcodeWithHardwareWebCodecs(
             chunkSize: 4 * 1024 * 1024,
           }),
           video: {
-            codec: isHevc ? 'hevc' : 'avc',
+            codec: muxerVideoCodec,
             width,
             height,
             frameRate: framerate,
@@ -650,7 +735,7 @@ export async function transcodeWithHardwareWebCodecs(
           bitrate,
           framerate,
           bitrateMode: 'variable',
-          hardwareAcceleration: 'prefer-hardware',
+          hardwareAcceleration: selectedAccel,
           latencyMode: 'quality',
         });
 
@@ -702,6 +787,8 @@ export async function transcodeWithHardwareWebCodecs(
               blob: finalBlob,
               codecUsed: selectedCodec!,
               isHevc,
+              isAv1,
+              isHardware,
               width,
               height,
               bitrateBps: bitrate,

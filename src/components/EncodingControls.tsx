@@ -67,17 +67,30 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
   const canUseHardwareGpu = Boolean(
     hardwareCaps?.webcodecs.hwH264 ||
       hardwareCaps?.webcodecs.hwHEVC ||
+      hardwareCaps?.webcodecs.hwAV1 ||
+      hardwareCaps?.webcodecs.available
+  );
+  const canUseAv1WebCodecs = Boolean(
+    hardwareCaps?.webcodecs.av1Available ||
+      hardwareCaps?.webcodecs.hwAV1 ||
+      hardwareCaps?.webcodecs.swAV1 ||
       hardwareCaps?.webcodecs.available
   );
 
   const isVideoMode = config.targetCategory === 'video' && config.container !== 'gif';
   const isRemuxMode = isVideoMode && config.videoCodec === 'copy';
   const isCompressMode = isVideoMode && config.videoCodec !== 'copy';
+  const isAv1Selected = config.videoCodec === 'av01';
   const isHwContainer = config.container === 'mp4' || config.container === 'mov';
+  const isAv1Container =
+    config.container === 'mp4' ||
+    config.container === 'mov' ||
+    config.container === 'mkv' ||
+    config.container === 'webm';
   const isHardwareActive =
     isCompressMode &&
-    isHwContainer &&
-    canUseHardwareGpu &&
+    ((isAv1Selected && isAv1Container && canUseAv1WebCodecs) ||
+      (!isAv1Selected && isHwContainer && canUseHardwareGpu)) &&
     config.hardwareAcceleration !== false &&
     config.hardwareEngine !== 'cpu';
 
@@ -118,14 +131,22 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
 
     const nextCodec: VideoCodec =
       overrideCodec ||
-      (targetContainer === 'webm'
+      (config.videoCodec === 'av01'
+        ? 'av01'
+        : targetContainer === 'webm'
         ? 'libvpx-vp9'
         : config.videoCodec === 'libx265'
         ? 'libx265'
         : 'libx264');
 
-    const hwSupportedForContainer = targetContainer === 'mp4' || targetContainer === 'mov';
-    const enableHw = canUseHardwareGpu && hwSupportedForContainer && config.hardwareEngine !== 'cpu';
+    const hwSupportedForTarget =
+      nextCodec === 'av01'
+        ? ['mp4', 'mov', 'mkv', 'webm'].includes(targetContainer) && canUseAv1WebCodecs
+        : (targetContainer === 'mp4' || targetContainer === 'mov') && canUseHardwareGpu;
+    const enableHw =
+      nextCodec === 'av01'
+        ? hwSupportedForTarget
+        : hwSupportedForTarget && config.hardwareEngine !== 'cpu';
 
     if (preset === 'light') {
       updateConfig({
@@ -227,19 +248,22 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
       applyCompressionPreset('balanced', 'libx264');
     } else if (presetName === 'hevc') {
       applyCompressionPreset('balanced', 'libx265');
+    } else if (presetName === 'av01') {
+      applyCompressionPreset('balanced', 'av01');
     } else if (presetName === 'webm-vp9') {
+      const keepAv1 = config.videoCodec === 'av01' && canUseAv1WebCodecs;
       updateConfig({
         targetCategory: 'video',
         container: 'webm',
-        videoCodec: 'libvpx-vp9',
+        videoCodec: keepAv1 ? 'av01' : 'libvpx-vp9',
         compressionPreset: 'balanced',
         rateControl: 'crf',
-        crf: 30,
+        crf: keepAv1 ? 26 : 30,
         resolution: 'source',
         audioCodec: 'libopus',
         audioBitrate: '128k',
-        hardwareAcceleration: false,
-        hardwareEngine: 'cpu',
+        hardwareAcceleration: keepAv1,
+        hardwareEngine: keepAv1 ? 'webgpu' : 'cpu',
       });
     } else if (presetName === 'gif') {
       updateConfig({
@@ -276,7 +300,7 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
     const canCopy =
       container === 'mkv' ||
       container === 'avi' ||
-      ['h264', 'avc1', 'hevc', 'h265', 'mpeg4', 'av1', 'prores'].some((c) => srcVid.includes(c));
+      ['h264', 'avc1', 'hevc', 'h265', 'mpeg4', 'av1', 'av01', 'prores'].some((c) => srcVid.includes(c));
     const srcAudio = (source?.audioCodec || '').toLowerCase();
     const isSafeAudio =
       container === 'mkv' ||
@@ -284,10 +308,15 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
 
     if (isCompressMode) {
       const nextCodec: VideoCodec =
-        config.videoCodec === 'libx265' || config.videoCodec === 'libx264'
+        config.videoCodec === 'av01' && container !== 'avi'
+          ? 'av01'
+          : config.videoCodec === 'libx265' || config.videoCodec === 'libx264'
           ? config.videoCodec
           : 'libx264';
-      const allowHw = canUseHardwareGpu && (container === 'mp4' || container === 'mov');
+      const allowHw =
+        nextCodec === 'av01'
+          ? canUseAv1WebCodecs && container !== 'avi'
+          : canUseHardwareGpu && (container === 'mp4' || container === 'mov');
       updateConfig({
         targetCategory: 'video',
         container,
@@ -295,7 +324,7 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
         audioCodec: config.audioCodec === 'none' ? 'none' : 'aac',
         fastStart: container === 'mp4' || container === 'mov',
         hardwareAcceleration: allowHw ? config.hardwareAcceleration !== false : false,
-        hardwareEngine: allowHw && config.hardwareEngine !== 'cpu' ? 'webgpu' : 'cpu',
+        hardwareEngine: allowHw && (nextCodec === 'av01' || config.hardwareEngine !== 'cpu') ? 'webgpu' : 'cpu',
       });
     } else {
       const useCopy = canCopy;
@@ -512,7 +541,7 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                   <span className="font-mono font-bold text-sm text-purple-400">WebM</span>
                   <Film className="w-3.5 h-3.5 text-zinc-400" />
                 </div>
-                <div className="text-[10px] text-zinc-500">VP9 / Opus</div>
+                <div className="text-[10px] text-zinc-500">AV1 / VP9</div>
               </button>
 
               {/* MP3 */}
@@ -770,14 +799,63 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                   </div>
                 </div>
 
-                {config.container !== 'webm' && (
-                  <div>
-                    <label className="text-zinc-400 block mb-1.5">Video Codec</label>
+                <div>
+                  <label className="text-zinc-400 block mb-1.5">Video Codec</label>
+                  {config.container === 'webm' ? (
                     <div className="grid grid-cols-2 gap-1.5">
                       <button
                         type="button"
-                        onClick={() => updateConfig({ videoCodec: 'libx264' })}
+                        onClick={() =>
+                          updateConfig({
+                            videoCodec: 'av01',
+                            hardwareAcceleration: canUseAv1WebCodecs,
+                            hardwareEngine: canUseAv1WebCodecs ? 'webgpu' : 'cpu',
+                          })
+                        }
                         className={`py-1.5 px-2.5 rounded-lg border text-left transition-colors cursor-pointer flex items-center justify-between ${
+                          config.videoCodec === 'av01'
+                            ? 'bg-emerald-500/15 border-emerald-400/60 text-emerald-300 font-bold'
+                            : 'bg-zinc-900/70 border-zinc-800 text-zinc-400 hover:text-zinc-200'
+                        }`}
+                      >
+                        <span>AV1 (av01)</span>
+                        {hardwareCaps?.webcodecs.hwAV1 ? (
+                          <span className="text-[9px] text-emerald-400">GPU</span>
+                        ) : hardwareCaps?.webcodecs.swAV1 ? (
+                          <span className="text-[9px] text-cyan-400">WC</span>
+                        ) : null}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateConfig({
+                            videoCodec: 'libvpx-vp9',
+                            hardwareAcceleration: false,
+                            hardwareEngine: 'cpu',
+                          })
+                        }
+                        className={`py-1.5 px-2.5 rounded-lg border text-left transition-colors cursor-pointer flex items-center justify-between ${
+                          config.videoCodec === 'libvpx-vp9'
+                            ? 'bg-purple-500/15 border-purple-400/60 text-purple-300 font-bold'
+                            : 'bg-zinc-900/70 border-zinc-800 text-zinc-400 hover:text-zinc-200'
+                        }`}
+                      >
+                        <span>VP9</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-3 gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const allowHw = canUseHardwareGpu && isHwContainer;
+                          updateConfig({
+                            videoCodec: 'libx264',
+                            hardwareAcceleration: allowHw,
+                            hardwareEngine: allowHw ? 'webgpu' : 'cpu',
+                          });
+                        }}
+                        className={`py-1.5 px-2 rounded-lg border text-left transition-colors cursor-pointer flex items-center justify-between ${
                           config.videoCodec === 'libx264'
                             ? 'bg-cyan-500/15 border-cyan-400/60 text-cyan-300 font-bold'
                             : 'bg-zinc-900/70 border-zinc-800 text-zinc-400 hover:text-zinc-200'
@@ -790,26 +868,99 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                       </button>
                       <button
                         type="button"
-                        onClick={() => updateConfig({ videoCodec: 'libx265' })}
-                        className={`py-1.5 px-2.5 rounded-lg border text-left transition-colors cursor-pointer flex items-center justify-between ${
+                        onClick={() => {
+                          const allowHw = canUseHardwareGpu && isHwContainer;
+                          updateConfig({
+                            videoCodec: 'libx265',
+                            hardwareAcceleration: allowHw,
+                            hardwareEngine: allowHw ? 'webgpu' : 'cpu',
+                          });
+                        }}
+                        className={`py-1.5 px-2 rounded-lg border text-left transition-colors cursor-pointer flex items-center justify-between ${
                           config.videoCodec === 'libx265'
                             ? 'bg-purple-500/15 border-purple-400/60 text-purple-300 font-bold'
                             : 'bg-zinc-900/70 border-zinc-800 text-zinc-400 hover:text-zinc-200'
                         }`}
                       >
-                        <span>H.265 / HEVC</span>
+                        <span>HEVC</span>
                         {hardwareCaps?.webcodecs.hwHEVC && isHwContainer && (
                           <span className="text-[9px] text-emerald-400">GPU</span>
                         )}
                       </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateConfig({
+                            videoCodec: 'av01',
+                            container: config.container === 'avi' ? 'mp4' : config.container,
+                            hardwareAcceleration: canUseAv1WebCodecs,
+                            hardwareEngine: canUseAv1WebCodecs ? 'webgpu' : 'cpu',
+                          })
+                        }
+                        className={`py-1.5 px-2 rounded-lg border text-left transition-colors cursor-pointer flex items-center justify-between ${
+                          config.videoCodec === 'av01'
+                            ? 'bg-emerald-500/15 border-emerald-400/60 text-emerald-300 font-bold'
+                            : 'bg-zinc-900/70 border-zinc-800 text-zinc-400 hover:text-zinc-200'
+                        }`}
+                      >
+                        <span>AV1</span>
+                        {hardwareCaps?.webcodecs.hwAV1 ? (
+                          <span className="text-[9px] text-emerald-400">GPU</span>
+                        ) : hardwareCaps?.webcodecs.swAV1 ? (
+                          <span className="text-[9px] text-cyan-400">WC</span>
+                        ) : null}
+                      </button>
                     </div>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
 
               {/* Hardware Accelerator Control */}
               <div className="p-3 rounded-lg bg-zinc-900/70 border border-zinc-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-                {canUseHardwareGpu && isHwContainer ? (
+                {isAv1Selected && isAv1Container ? (
+                  canUseAv1WebCodecs ? (
+                    <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={config.hardwareAcceleration !== false}
+                        onChange={(e) =>
+                          updateConfig({
+                            hardwareAcceleration: e.target.checked,
+                            hardwareEngine: 'webgpu',
+                          })
+                        }
+                        className="rounded bg-zinc-800 border-zinc-700 text-emerald-500 focus:ring-0 w-3.5 h-3.5 mt-0.5 cursor-pointer"
+                      />
+                      <div>
+                        <div className="text-xs text-zinc-100 font-semibold flex items-center gap-1.5">
+                          <Zap className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>
+                            {hardwareCaps?.webcodecs.hwAV1
+                              ? 'Hardware GPU AV1 (av01)'
+                              : 'WebCodecs AV1 (av01) Encoder'}
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-zinc-400 mt-0.5">
+                          {hardwareCaps?.webcodecs.hwAV1 && config.hardwareAcceleration !== false
+                            ? `Active on ${acceleratorLabel}`
+                            : 'Encoding av01 via browser WebCodecs engine'}
+                        </div>
+                      </div>
+                    </label>
+                  ) : (
+                    <div className="flex items-start gap-2.5">
+                      <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                      <div>
+                        <div className="text-xs text-amber-300 font-semibold">
+                          AV1 (av01) Encoding Unavailable
+                        </div>
+                        <div className="text-[10px] text-zinc-400 mt-0.5">
+                          This browser does not expose WebCodecs AV1 encoding. Switch to H.264/HEVC or Remux.
+                        </div>
+                      </div>
+                    </div>
+                  )
+                ) : canUseHardwareGpu && isHwContainer ? (
                   <label className="flex items-start gap-2.5 cursor-pointer select-none">
                     <input
                       type="checkbox"
@@ -852,7 +1003,7 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                   </div>
                 )}
 
-                {!isHwContainer && canUseHardwareGpu && (
+                {!isHwContainer && !isAv1Selected && canUseHardwareGpu && (
                   <button
                     type="button"
                     onClick={() => handleSelectVideoContainer('mp4')}
@@ -862,7 +1013,7 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                   </button>
                 )}
 
-                {sizeEstimate && isHwContainer && (
+                {sizeEstimate && (isHwContainer || (isAv1Selected && isAv1Container)) && (
                   <div className="text-[10px] text-zinc-400 sm:text-right shrink-0">
                     <div>
                       Video target:{' '}
@@ -1042,6 +1193,17 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                 </button>
                 <button
                   type="button"
+                  onClick={() => applyCompressionPreset('balanced', 'av01')}
+                  className={`px-2 py-1 rounded text-[11px] font-mono border transition-colors cursor-pointer ${
+                    config.videoCodec === 'av01'
+                      ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300'
+                      : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  AV1 (av01)
+                </button>
+                <button
+                  type="button"
                   onClick={() => applyPreset('webm-vp9')}
                   className="px-2 py-1 rounded text-[11px] font-mono bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-zinc-200 cursor-pointer"
                 >
@@ -1173,6 +1335,14 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                           compressionPreset: undefined,
                           hardwareEngine: 'stream-copy',
                         });
+                      } else if (next === 'av01') {
+                        updateConfig({
+                          videoCodec: 'av01',
+                          container: config.container === 'avi' ? 'mp4' : config.container,
+                          compressionPreset: config.compressionPreset || 'balanced',
+                          hardwareAcceleration: canUseAv1WebCodecs,
+                          hardwareEngine: canUseAv1WebCodecs ? 'webgpu' : 'cpu',
+                        });
                       } else {
                         const allowHw = canUseHardwareGpu && isHwContainer;
                         updateConfig({
@@ -1188,6 +1358,7 @@ export const EncodingControls: React.FC<EncodingControlsProps> = ({
                     <option value="copy">Copy (Remux — no re-encode)</option>
                     <option value="libx264">H.264 (AVC / Hardware GPU)</option>
                     <option value="libx265">H.265 / HEVC (Smaller file)</option>
+                    <option value="av01">AV1 (av01 — Highest compression)</option>
                     <option value="libvpx-vp9">VP9 (WebM)</option>
                   </select>
                 </div>

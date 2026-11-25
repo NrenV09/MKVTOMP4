@@ -85,7 +85,7 @@ export const MediaDropzone: React.FC<MediaDropzoneProps> = ({
           Drop a video or audio file
         </h2>
         <p className="text-xs font-mono text-zinc-400 mb-5">
-          MKV, MP4, MOV, WebM, AVI, TS, MP3, WAV, FLAC, M4A, Opus
+          MKV, MP4, MOV, WebM, AVI, TS, IVF (AV1), MP3, WAV, FLAC, M4A, Opus
         </p>
 
         <button

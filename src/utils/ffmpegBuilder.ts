@@ -144,15 +144,33 @@ export function checkCompatibility(
     }
   }
 
+  // AV1 (av01) target container check
+  if (config.videoCodec === 'av01') {
+    if (config.container === 'avi') {
+      return {
+        isCompatible: false,
+        warning: 'AVI container does not support AV1 (av01) video.',
+        suggestion: 'Switch container to MP4, WebM, or MKV.',
+        droppedBitmapSubtitles,
+      };
+    }
+  }
+
   // Stream Copy checks
   if (config.videoCodec === 'copy') {
     const srcVideo = (source.videoCodec || '').toLowerCase();
 
-    if (config.container === 'webm' && !srcVideo.includes('vp8') && !srcVideo.includes('vp9') && !srcVideo.includes('av1')) {
+    if (
+      config.container === 'webm' &&
+      !srcVideo.includes('vp8') &&
+      !srcVideo.includes('vp9') &&
+      !srcVideo.includes('av1') &&
+      !srcVideo.includes('av01')
+    ) {
       return {
         isCompatible: false,
-        warning: `WebM requires VP8/VP9/AV1 video codecs. Source appears to be ${srcVideo.toUpperCase() || 'H.264/HEVC'}.`,
-        suggestion: 'Switch Video Encoder to VP9 or switch container to MP4/MKV.',
+        warning: `WebM requires VP8/VP9/AV1 (av01) video codecs. Source appears to be ${srcVideo.toUpperCase() || 'H.264/HEVC'}.`,
+        suggestion: 'Switch Video Encoder to AV1 (av01) or VP9, or switch container to MP4/MKV.',
         droppedBitmapSubtitles,
       };
     }
@@ -165,7 +183,7 @@ export function checkCompatibility(
         return {
           isCompatible: false,
           warning: `MP4 container cannot stream-copy '${srcVideo.toUpperCase()}' video codec.`,
-          suggestion: 'Switch Video Encoder to H.264 (libx264) for clean re-encoding.',
+          suggestion: 'Switch Video Encoder to H.264 or AV1 (av01) for clean re-encoding.',
           droppedBitmapSubtitles,
         };
       }
@@ -593,8 +611,21 @@ export function buildFFmpegArgs(
     if (isAppleTarget && isSourceHevc) {
       args.push('-tag:v', 'hvc1');
     }
+
+    const isSourceAv1 =
+      source?.videoCodec?.toLowerCase().includes('av1') ||
+      source?.videoCodec?.toLowerCase().includes('av01') ||
+      source?.videoTracks?.some(
+        (v) =>
+          selectedVideoIndices.includes(v.typeIndex) &&
+          (v.codec.includes('av1') || v.codec.includes('av01'))
+      );
+
+    if (isAppleTarget && isSourceAv1) {
+      args.push('-tag:v', 'av01');
+    }
   } else {
-    args.push('-c:v', config.videoCodec);
+    args.push('-c:v', config.videoCodec === 'av01' ? 'libaom-av1' : config.videoCodec);
 
     // Speed Preset
     if (['libx264', 'libx265'].includes(config.videoCodec)) {
@@ -656,9 +687,12 @@ export function buildFFmpegArgs(
       args.push('-profile:v', 'high', '-level', '4.2');
     }
 
-    // Apple HEVC Tag for QuickTime / iPadOS Photos / Safari native playback
+    // Apple HEVC / AV1 FourCC Tags for QuickTime / iPadOS / Safari / Android native playback
     if (config.videoCodec === 'libx265' && isAppleTarget) {
       args.push('-tag:v', 'hvc1');
+    }
+    if (config.videoCodec === 'av01' && isAppleTarget) {
+      args.push('-tag:v', 'av01');
     }
   }
 
@@ -883,6 +917,22 @@ export function diagnoseFFmpegFailure(
       explanation: `One or more source streams (${source?.videoCodec?.toUpperCase() || 'video'}/${source?.audioCodec?.toUpperCase() || 'audio'}) cannot be copied directly into a .${config.container.toUpperCase()} container without transcoding.`,
       suggestion:
         'Switch Video Codec to H.264 (libx264) and Audio Codec to AAC, or change the output container to .MKV which accepts virtually all codecs.',
+    };
+  }
+
+  // 4.2. AV1 (av01) WebCodecs / Decoder Requirement
+  if (
+    combined.includes('libaom-av1') ||
+    combined.includes('av1 decode') ||
+    combined.includes('webcodecs av1') ||
+    (combined.includes('av01') && (combined.includes('unsupported') || combined.includes('not support')))
+  ) {
+    return {
+      title: 'AV1 (av01) Encoder / Decoder Requires WebCodecs Support',
+      explanation:
+        'AV1 (av01) encoding and decoding runs through your browser WebCodecs GPU/media engine. Remuxing (Stream Copy) works in all browsers without re-encoding.',
+      suggestion:
+        'Enable Hardware GPU Accelerator in Chrome, Edge, Firefox, or Safari 17+, or switch to Remux (Stream Copy) to change containers losslessly.',
     };
   }
 

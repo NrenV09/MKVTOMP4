@@ -9,6 +9,7 @@ export type VideoCodec =
   | 'copy' 
   | 'libx264' 
   | 'libx265' 
+  | 'av01'
   | 'libvpx-vp9' 
   | 'prores' 
   | 'gif';

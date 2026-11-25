@@ -189,7 +189,11 @@ export const SourceInspector: React.FC<SourceInspectorProps> = ({
           </div>
           <div className="text-zinc-200 font-semibold text-[13px] truncate">
             {source.hasVideo ? (
-              source.videoCodec ? source.videoCodec.toUpperCase() : 'Video'
+              source.videoCodec
+                ? source.videoCodec.toLowerCase() === 'av1' || source.videoCodec.toLowerCase() === 'av01'
+                  ? 'AV1 (av01)'
+                  : source.videoCodec.toUpperCase()
+                : 'Video'
             ) : (
               <span className="text-zinc-600">None</span>
             )}
@@ -301,7 +305,7 @@ export const SourceInspector: React.FC<SourceInspectorProps> = ({
               <div className="space-y-1.5">
                 {videoTracks.map((v) => {
                   const isSelected = selectedVideoIndices.includes(v.typeIndex);
-                  const isMp4CopySafe = ['h264', 'avc1', 'hevc', 'h265', 'hvc1', 'av1', 'mpeg4'].some((c) =>
+                  const isMp4CopySafe = ['h264', 'avc1', 'hevc', 'h265', 'hvc1', 'av1', 'av01', 'mpeg4'].some((c) =>
                     v.codec.includes(c)
                   );
                   return (

@@ -165,9 +165,14 @@ export default function App() {
         addLog('system', `WebGPU hardware adapter initialized: ${caps.webgpu.description || caps.webgpu.adapterName}`);
       }
       if (caps.webcodecs.available) {
+        const av1Status = caps.webcodecs.hwAV1
+          ? 'Hardware'
+          : caps.webcodecs.swAV1
+          ? 'WebCodecs'
+          : 'Remux only';
         addLog(
           'system',
-          `WebCodecs GPU media engine ready (H.264: ${caps.webcodecs.hwH264 ? 'Hardware' : 'No'}, HEVC: ${caps.webcodecs.hwHEVC ? 'Hardware' : 'No'})`
+          `WebCodecs GPU media engine ready (H.264: ${caps.webcodecs.hwH264 ? 'Hardware' : 'No'}, HEVC: ${caps.webcodecs.hwHEVC ? 'Hardware' : 'No'}, AV1/av01: ${av1Status})`
         );
       }
     });
@@ -906,19 +911,49 @@ export default function App() {
       const hwMaxBytes = devCaps.isAndroid ? 600 * 1024 * 1024 : 1500 * 1024 * 1024;
       const isVideoTarget = config.targetCategory === 'video' && config.container !== 'gif';
       const isCopy = isVideoTarget && config.videoCodec === 'copy';
+      const isTargetAv1 = isVideoTarget && config.videoCodec === 'av01';
+      const isSourceAv1 =
+        (effectiveMeta.videoCodec || '').toLowerCase().includes('av1') ||
+        (effectiveMeta.videoCodec || '').toLowerCase().includes('av01');
       const isHwContainer = config.container === 'mp4' || config.container === 'mov';
+      const isAv1MuxContainer =
+        config.container === 'mp4' ||
+        config.container === 'mov' ||
+        config.container === 'mkv' ||
+        config.container === 'webm';
+
+      if (isTargetAv1 && !isAv1MuxContainer) {
+        throw new Error(
+          `AV1 (av01) video is not supported in .${config.container.toUpperCase()}. Switch container to MP4, WebM, MKV, or MOV.`
+        );
+      }
+
       const canHardwareWebCodecs =
         rawFile.size <= hwMaxBytes &&
         isVideoTarget &&
         !isCopy &&
-        isHwContainer &&
-        config.hardwareAcceleration !== false &&
-        config.hardwareEngine !== 'cpu' &&
-        Boolean(
-          hardwareCaps?.webcodecs.hwH264 ||
-            hardwareCaps?.webcodecs.hwHEVC ||
-            hardwareCaps?.webcodecs.available
+        ((isTargetAv1 &&
+          isAv1MuxContainer &&
+          Boolean(hardwareCaps?.webcodecs.av1Available || hardwareCaps?.webcodecs.available)) ||
+          (isSourceAv1 &&
+            isAv1MuxContainer &&
+            Boolean(hardwareCaps?.webcodecs.available)) ||
+          (isHwContainer &&
+            config.hardwareAcceleration !== false &&
+            config.hardwareEngine !== 'cpu' &&
+            Boolean(
+              hardwareCaps?.webcodecs.hwH264 ||
+                hardwareCaps?.webcodecs.hwHEVC ||
+                hardwareCaps?.webcodecs.available
+            )));
+
+      if (isTargetAv1 && !canHardwareWebCodecs) {
+        throw new Error(
+          rawFile.size > hwMaxBytes
+            ? `File exceeds the ${Math.round(hwMaxBytes / 1048576)} MB WebCodecs AV1 (av01) limit on this device.`
+            : 'This browser does not support WebCodecs AV1 (av01) encoding.'
         );
+      }
 
       let outputBlob: Blob | null = null;
       let executedCommand: string[] = [];
@@ -1072,26 +1107,33 @@ export default function App() {
         const mimeType = getMimeType(config.container);
         outputBlob = await readOutputAsBlob(virtualOut, mimeType, useZeroCopyFastStart);
       } else if (canHardwareWebCodecs) {
-        // HARDWARE GPU VIDEO COMPRESSION (WebCodecs VideoEncoder + prefer-hardware)
-        const preferredHwCodec: 'avc' | 'hevc' =
-          config.videoCodec === 'libx265' ? 'hevc' : 'avc';
-        const gpuEngineLabel = devCaps.isAndroid
-          ? `Hardware GPU (${devCaps.chipLabel})`
-          : hardwareCaps?.webgpu.description &&
-            hardwareCaps.webgpu.description !== 'WebGPU Not Supported'
-          ? `Hardware GPU (${hardwareCaps.webgpu.description})`
-          : 'Hardware GPU Media Engine';
+        // WEBCODECS GPU / AV1 (av01) COMPRESSION PIPELINE
+        const preferredHwCodec: 'avc' | 'hevc' | 'av01' =
+          config.videoCodec === 'av01'
+            ? 'av01'
+            : config.videoCodec === 'libx265'
+            ? 'hevc'
+            : 'avc';
+        const gpuEngineLabel =
+          preferredHwCodec === 'av01' && !hardwareCaps?.webcodecs.hwAV1
+            ? 'WebCodecs AV1 (av01) Engine'
+            : devCaps.isAndroid
+            ? `Hardware GPU (${devCaps.chipLabel})`
+            : hardwareCaps?.webgpu.description &&
+              hardwareCaps.webgpu.description !== 'WebGPU Not Supported'
+            ? `Hardware GPU (${hardwareCaps.webgpu.description})`
+            : 'Hardware GPU Media Engine';
 
         setTelemetry((prev) => ({
           ...prev,
           accelerationMode: gpuEngineLabel,
         }));
-        addLog('system', `Initializing hardware GPU compression pipeline (${gpuEngineLabel})...`);
+        addLog('system', `Initializing WebCodecs compression pipeline (${gpuEngineLabel})...`);
 
         let sourceBlobForHw: Blob = rawFile;
         const lowerExtIn = extIn.toLowerCase();
-        if (['.mkv', '.avi', '.flv', '.ts', '.m2ts', '.mts'].includes(lowerExtIn)) {
-          addLog('system', 'Pre-flight stream remuxing for hardware video decoder...');
+        if (['.mkv', '.avi', '.flv', '.ts', '.m2ts', '.mts', '.ivf', '.av1', '.obu'].includes(lowerExtIn)) {
+          addLog('system', 'Pre-flight stream remuxing for browser video decoder...');
           const tempRemuxOut = `temp_hw_remux_${Date.now()}.mp4`;
           const remuxArgs = [
             '-hide_banner',
@@ -1104,6 +1146,7 @@ export default function App() {
             virtualIn,
             '-c:v',
             'copy',
+            ...(isSourceAv1 ? ['-tag:v', 'av01'] : []),
             '-an',
             '-sn',
             '-dn',
@@ -1126,7 +1169,7 @@ export default function App() {
               ? Math.round(effectiveMeta.fps)
               : 30;
 
-          // Determine selected audio and text subtitle tracks to mux after hardware video compression
+          // Determine selected audio and subtitle tracks to mux after video compression
           const probedAudioSet = new Set((effectiveMeta.audioTracks || []).map((a) => a.typeIndex));
           const rawAudioIndices =
             config.audioCodec === 'none' || !effectiveMeta.hasAudio
@@ -1141,11 +1184,11 @@ export default function App() {
               ? rawAudioIndices.filter((idx) => probedAudioSet.has(idx))
               : rawAudioIndices;
 
-          const validTextSubtitles =
+          const validSubtitles =
             config.subtitleMode === 'drop'
               ? []
               : (effectiveMeta.subtitleTracks || []).filter((s) => {
-                  if (s.formatType !== 'text') return false;
+                  if (config.container !== 'mkv' && s.formatType !== 'text') return false;
                   if (config.selectedSubtitleTrackIndices !== undefined) {
                     return config.selectedSubtitleTrackIndices.includes(s.typeIndex);
                   }
@@ -1154,14 +1197,21 @@ export default function App() {
 
           const needsFinalMux =
             validAudioIndices.length > 0 ||
-            validTextSubtitles.length > 0 ||
-            config.container === 'mov';
+            validSubtitles.length > 0 ||
+            config.container !== 'mp4';
+
+          const codecLabel =
+            preferredHwCodec === 'av01'
+              ? 'AV1 (av01)'
+              : preferredHwCodec === 'hevc'
+              ? 'HEVC / H.265'
+              : 'H.264 / AVC';
 
           addLog(
             'system',
-            `Hardware GPU target: ${config.resolution === 'source' ? 'Original resolution' : config.resolution} @ ${(
+            `WebCodecs target: ${config.resolution === 'source' ? 'Original resolution' : config.resolution} @ ${(
               bitrateBps / 1_000_000
-            ).toFixed(2)} Mbps (${preferredHwCodec === 'hevc' ? 'HEVC / H.265' : 'H.264 / AVC'}, ${targetFramerate} fps).`
+            ).toFixed(2)} Mbps (${codecLabel}, ${targetFramerate} fps).`
           );
 
           const hwResult = await transcodeWithHardwareWebCodecs(sourceBlobForHw, {
@@ -1169,6 +1219,7 @@ export default function App() {
             bitrate: bitrateBps,
             framerate: targetFramerate,
             preferredCodec: preferredHwCodec,
+            preferHardware: config.hardwareAcceleration !== false,
             fastStart: !needsFinalMux && useZeroCopyFastStart,
             webgpuFilter: config.webgpuFilter,
             signal: hwAbortController.current.signal,
@@ -1182,7 +1233,7 @@ export default function App() {
                 currentTime: p.currentTime,
                 duration: p.duration,
                 fps: p.fps,
-                speed: `${p.fps} fps (GPU)`,
+                speed: `${p.fps} fps (${preferredHwCodec === 'av01' && !hardwareCaps?.webcodecs.hwAV1 ? 'AV1' : 'GPU'})`,
                 elapsedMs: elapsed,
                 etaSeconds:
                   remainingSec !== null ? Math.max(0, Math.round(remainingSec)) : null,
@@ -1194,9 +1245,10 @@ export default function App() {
           const mimeType = getMimeType(config.container);
 
           if (needsFinalMux) {
+            const muxCodecName = hwResult.isAv1 ? 'AV1 (av01)' : hwResult.isHevc ? 'HEVC' : 'H.264';
             addLog(
               'system',
-              `Muxing compressed ${hwResult.isHevc ? 'HEVC' : 'H.264'} video with ${validAudioIndices.length} audio & ${validTextSubtitles.length} subtitle track(s) into .${config.container.toUpperCase()}...`
+              `Muxing compressed ${muxCodecName} video with ${validAudioIndices.length} audio & ${validSubtitles.length} subtitle track(s) into .${config.container.toUpperCase()}...`
             );
             const hwMountDir = `/hw_mnt_${Date.now()}`;
             const hwVideoName = `hw_video_${Date.now()}.mp4`;
@@ -1226,75 +1278,114 @@ export default function App() {
                 args.push('-map', `1:a:${aIdx}?`);
               }
 
-              if (includeSubtitles && validTextSubtitles.length > 0) {
-                for (const sTrack of validTextSubtitles) {
+              if (includeSubtitles && validSubtitles.length > 0) {
+                for (const sTrack of validSubtitles) {
                   args.push('-map', `1:s:${sTrack.typeIndex}`);
                 }
               }
 
               args.push('-c:v', 'copy');
-              if (hwResult.isHevc) {
-                args.push('-tag:v', 'hvc1');
+              if (config.container === 'mp4' || config.container === 'mov') {
+                if (hwResult.isAv1) {
+                  args.push('-tag:v', 'av01');
+                } else if (hwResult.isHevc) {
+                  args.push('-tag:v', 'hvc1');
+                }
               }
 
               if (validAudioIndices.length === 0) {
                 args.push('-an');
-              } else if (config.audioCodec === 'copy') {
-                const selectedAudioObjs =
-                  effectiveMeta.audioTracks?.filter((a) =>
-                    validAudioIndices.includes(a.typeIndex)
-                  ) || [];
-                const allCompatible =
-                  selectedAudioObjs.length > 0 &&
-                  selectedAudioObjs.every((a) => a.isMp4Compatible);
-                if (allCompatible) {
+              } else if (config.container === 'webm') {
+                const srcAudio = (effectiveMeta.audioCodec || '').toLowerCase();
+                if (config.audioCodec === 'copy' && (srcAudio.includes('opus') || srcAudio.includes('vorbis'))) {
                   args.push('-c:a', 'copy');
                 } else {
                   args.push(
                     '-c:a',
-                    'aac',
+                    'libopus',
                     '-b:a',
                     config.audioBitrate === 'lossless' ? '192k' : config.audioBitrate
                   );
                 }
+              } else if (config.audioCodec === 'copy') {
+                if (config.container === 'mkv') {
+                  args.push('-c:a', 'copy');
+                } else {
+                  const selectedAudioObjs =
+                    effectiveMeta.audioTracks?.filter((a) =>
+                      validAudioIndices.includes(a.typeIndex)
+                    ) || [];
+                  const allCompatible =
+                    selectedAudioObjs.length > 0 &&
+                    selectedAudioObjs.every((a) => a.isMp4Compatible);
+                  if (allCompatible) {
+                    args.push('-c:a', 'copy');
+                  } else {
+                    args.push(
+                      '-c:a',
+                      'aac',
+                      '-b:a',
+                      config.audioBitrate === 'lossless' ? '192k' : config.audioBitrate
+                    );
+                  }
+                }
               } else {
                 const safeAudioCodec =
-                  config.audioCodec === 'aac' || config.audioCodec === 'libmp3lame'
+                  config.container === 'mkv'
+                    ? config.audioCodec
+                    : config.audioCodec === 'aac' || config.audioCodec === 'libmp3lame'
                     ? config.audioCodec
                     : 'aac';
-                args.push(
-                  '-c:a',
-                  safeAudioCodec,
-                  '-b:a',
-                  config.audioBitrate === 'lossless' ? '192k' : config.audioBitrate
-                );
+                args.push('-c:a', safeAudioCodec);
+                if (safeAudioCodec !== 'flac' && safeAudioCodec !== 'pcm_s16le') {
+                  args.push(
+                    '-b:a',
+                    config.audioBitrate === 'lossless' ? '192k' : config.audioBitrate
+                  );
+                }
                 if (config.audioChannels === 'mono') args.push('-ac', '1');
                 else if (config.audioChannels === 'stereo') args.push('-ac', '2');
                 else if (config.audioChannels === '5.1') args.push('-ac', '6');
                 if (config.audioSampleRate !== 'source') args.push('-ar', config.audioSampleRate);
               }
 
-              if (includeSubtitles && validTextSubtitles.length > 0) {
-                args.push('-c:s', 'mov_text');
+              if (includeSubtitles && validSubtitles.length > 0) {
+                if (config.container === 'webm') {
+                  args.push('-c:s', 'webvtt');
+                } else if (config.container === 'mkv') {
+                  args.push('-c:s', config.subtitleMode === 'convert' ? 'srt' : 'copy');
+                } else {
+                  args.push('-c:s', 'mov_text');
+                }
               } else {
                 args.push('-sn');
               }
 
-              args.push('-dn', '-avoid_negative_ts', 'make_zero', '-max_muxing_queue_size', '4096', '-shortest', virtualOut);
+              args.push(
+                '-dn',
+                '-avoid_negative_ts',
+                'make_zero',
+                '-max_muxing_queue_size',
+                '4096',
+                '-shortest',
+                virtualOut
+              );
               return args;
             };
 
             try {
               let muxCode = await ffmpeg.exec(buildHwMuxArgs(true));
-              if (muxCode !== 0 && validTextSubtitles.length > 0) {
+              if (muxCode !== 0 && validSubtitles.length > 0) {
                 try { await ffmpeg.deleteFile(virtualOut); } catch {}
-                addLog('system', 'Retrying hardware video + audio mux without incompatible subtitles...');
+                addLog('system', 'Retrying video + audio mux without incompatible subtitles...');
                 muxCode = await ffmpeg.exec(buildHwMuxArgs(false));
               }
               if (muxCode === 0) {
                 outputBlob = await readOutputAsBlob(virtualOut, mimeType, useZeroCopyFastStart);
-              } else {
+              } else if (config.container === 'mp4') {
                 outputBlob = hwResult.blob;
+              } else {
+                throw new Error(`Muxing AV1/WebCodecs output into .${config.container.toUpperCase()} failed (exit code ${muxCode}).`);
               }
             } finally {
               try { await ffmpeg.unmount(hwMountDir); } catch {}
@@ -1305,20 +1396,21 @@ export default function App() {
           }
 
           executedCommand = [
-            'webcodecs-gpu',
+            hwResult.isHardware ? 'webcodecs-gpu' : 'webcodecs',
             `--codec=${hwResult.codecUsed}`,
+            `--container=${config.container}`,
             `--resolution=${hwResult.width}x${hwResult.height}`,
             `--bitrate=${Math.round(hwResult.bitrateBps / 1000)}k`,
-            '--hardware-acceleration=prefer-hardware',
+            `--hardware-acceleration=${hwResult.isHardware ? 'prefer-hardware' : 'no-preference'}`,
           ];
           addLog(
             'system',
-            `Hardware GPU compression finished (${hwResult.codecUsed}, ${hwResult.width}x${hwResult.height}, ${(
+            `WebCodecs compression finished (${hwResult.codecUsed}, ${hwResult.width}x${hwResult.height}, ${(
               hwResult.bitrateBps / 1_000_000
-            ).toFixed(2)} Mbps).`
+            ).toFixed(2)} Mbps, ${hwResult.isHardware ? 'Hardware GPU' : 'WebCodecs'}).`
           );
         } catch (hwErr: any) {
-          if (hwAbortController.current?.signal.aborted) {
+          if (hwAbortController.current?.signal.aborted || isTargetAv1) {
             throw hwErr;
           }
           addLog(
@@ -1654,6 +1746,10 @@ export default function App() {
                               {config.targetCategory === 'video' && config.container !== 'gif'
                                 ? config.videoCodec === 'copy'
                                   ? 'Remux (Direct stream copy)'
+                                  : config.videoCodec === 'av01'
+                                  ? hardwareCaps?.webcodecs.hwAV1 && config.hardwareAcceleration !== false
+                                    ? 'Compress (Hardware GPU • AV1 av01)'
+                                    : 'Compress (WebCodecs • AV1 av01)'
                                   : config.hardwareAcceleration !== false &&
                                     config.hardwareEngine !== 'cpu' &&
                                     (config.container === 'mp4' || config.container === 'mov') &&
@@ -1777,6 +1873,10 @@ export default function App() {
                                 ? 'Remux (Direct copy, no re-encoding)'
                                 : config.videoCodec === 'copy'
                                 ? 'Remux (Video copy + audio convert)'
+                                : config.videoCodec === 'av01'
+                                ? hardwareCaps?.webcodecs.hwAV1 && config.hardwareAcceleration !== false
+                                  ? 'Compress (Hardware GPU • AV1 av01)'
+                                  : 'Compress (WebCodecs • AV1 av01)'
                                 : config.hardwareAcceleration !== false &&
                                   config.hardwareEngine !== 'cpu' &&
                                   (config.container === 'mp4' || config.container === 'mov') &&

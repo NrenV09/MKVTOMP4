@@ -365,6 +365,7 @@ export async function detectFileExtensionFromMagicBytes(file: File): Promise<str
   if (mime === 'video/webm') return '.webm';
   if (mime === 'video/x-msvideo' || mime === 'video/avi') return '.avi';
   if (mime === 'video/mp2t') return '.ts';
+  if (mime === 'video/av1' || mime === 'video/x-ivf') return '.ivf';
   if (mime === 'audio/mpeg') return '.mp3';
   if (mime === 'audio/wav' || mime === 'audio/x-wav') return '.wav';
   if (mime === 'audio/flac') return '.flac';
@@ -404,6 +405,11 @@ export async function detectFileExtensionFromMagicBytes(file: File): Promise<str
     // 4. FLV ('FLV\x01')
     if (u8[0] === 0x46 && u8[1] === 0x4c && u8[2] === 0x56 && u8[3] === 0x01) {
       return '.flv';
+    }
+
+    // 4.5. On2 IVF ('DKIF') — standard raw AV1 (av01) / VP9 container
+    if (u8[0] === 0x44 && u8[1] === 0x4b && u8[2] === 0x49 && u8[3] === 0x46) {
+      return '.ivf';
     }
 
     // 5. MPEG-TS (0x47 sync byte every 188 bytes) or M2TS (every 192 bytes at offset 4)
@@ -467,14 +473,14 @@ async function probeLargeFileSlices(file: File, isAudioOnly: boolean): Promise<P
 
     const scanText = asciiFrom(headU8) + (tailU8 ? ' ' + asciiFrom(tailU8) : '');
 
-    // Detect Video Codec from FourCC (MP4/MOV) or CodecID (MKV/WebM)
+    // Detect Video Codec from FourCC (MP4/MOV/IVF) or CodecID (MKV/WebM)
     if (!isAudioOnly) {
-      if (scanText.includes('V_MPEGH/ISO/HEVC') || /\b(hvc1|hev1)\b/.test(scanText)) {
+      if (scanText.includes('V_AV1') || /\b(av01|AV01)\b/.test(scanText)) {
+        result.videoCodec = 'av01';
+      } else if (scanText.includes('V_MPEGH/ISO/HEVC') || /\b(hvc1|hev1)\b/.test(scanText)) {
         result.videoCodec = 'hevc';
       } else if (scanText.includes('V_MPEG4/ISO/AVC') || /\b(avc1|avc3)\b/.test(scanText)) {
         result.videoCodec = 'h264';
-      } else if (scanText.includes('V_AV1') || /\bav01\b/.test(scanText)) {
-        result.videoCodec = 'av1';
       } else if (scanText.includes('V_VP9') || /\bvp09\b/.test(scanText)) {
         result.videoCodec = 'vp9';
       } else if (scanText.includes('V_VP8') || /\bvp08\b/.test(scanText)) {
@@ -587,7 +593,7 @@ export async function probeMediaElement(file: File): Promise<Partial<SourceMetad
   // CRITICAL iPadOS WebKit Jetsam Safeguard:
   // Never pass a > 150 MB file (e.g. 2-3 GB movie) to URL.createObjectURL + <video src="blob:...">
   // or non-native containers (.mkv, .avi, .flv, .wmv, .ts) of any large size.
-  const isNonBrowserContainer = ['.mkv', '.avi', '.flv', '.wmv', '.ts', '.m2ts', '.vob'].includes(ext);
+  const isNonBrowserContainer = ['.mkv', '.avi', '.flv', '.wmv', '.ts', '.m2ts', '.vob', '.ivf', '.av1', '.obu'].includes(ext);
   if (file.size > 150 * 1024 * 1024 || (isNonBrowserContainer && file.size > 25 * 1024 * 1024)) {
     return probeLargeFileSlices(file, isAudioOnly);
   }
