@@ -163,9 +163,213 @@ function buildVp9CodecString(vpcC: Uint8Array): string {
   return `vp09.${String(profile).padStart(2, '0')}.${String(level).padStart(2, '0')}.${String(bitDepth || 8).padStart(2, '0')}`;
 }
 
+interface TrexDefaults {
+  defaultSampleDuration: number;
+  defaultSampleSize: number;
+  defaultSampleFlags: number;
+}
+
 /**
- * Demuxes the primary video track sample table from an MP4/MOV Blob without loading `mdat`.
- * Returns `null` for non-MP4, fragmented MP4 (`mvex`), or unsupported codecs so caller can fallback.
+ * Zero-copy fragmented MP4 (`moof`/`traf`/`trun`) sample table reader.
+ * Scans only top-level box headers and `moof` atoms (< 8 KB each), never loading `mdat`.
+ */
+async function parseFragmentedSamples(
+  blob: Blob,
+  videoTrackId: number,
+  timescale: number,
+  trex: TrexDefaults
+): Promise<{ samples: DemuxedSample[]; durationSeconds: number } | null> {
+  const totalSize = blob.size;
+  const rawSamples: {
+    type: 'key' | 'delta';
+    pts: number;
+    dur: number;
+    offset: number;
+    size: number;
+  }[] = [];
+
+  let offset = 0;
+  let guard = 0;
+  let runningDecodeTime = 0;
+  let minPts = Infinity;
+
+  while (offset + 8 <= totalSize && guard < 100000) {
+    guard++;
+    const hdrLen = Math.min(16, totalSize - offset);
+    const hdr = await readBlobRange(blob, offset, offset + hdrLen);
+    const hdrView = new DataView(hdr.buffer, hdr.byteOffset, hdr.byteLength);
+    const size32 = hdrView.getUint32(0, false);
+    const type = readFourCC(hdrView, 4);
+    let boxSize = size32;
+    let headerSize = 8;
+    if (size32 === 1) {
+      if (hdrLen < 16) break;
+      boxSize = readUint64(hdrView, 8);
+      headerSize = 16;
+    } else if (size32 === 0) {
+      boxSize = totalSize - offset;
+    }
+    if (!Number.isFinite(boxSize) || boxSize < headerSize || offset + boxSize > totalSize) {
+      break;
+    }
+
+    if (type === 'moof' && boxSize <= 16 * 1024 * 1024) {
+      const moofBytes = await readBlobRange(blob, offset, offset + boxSize);
+      const view = new DataView(moofBytes.buffer, moofBytes.byteOffset, moofBytes.byteLength);
+      const moofChildren = iterChildBoxes(view, headerSize, moofBytes.byteLength);
+
+      for (const traf of moofChildren) {
+        if (traf.type !== 'traf') continue;
+        const trafChildren = iterChildBoxes(view, traf.start + traf.headerSize, traf.start + traf.size);
+        const tfhd = trafChildren.find((b) => b.type === 'tfhd');
+        if (!tfhd || tfhd.size < tfhd.headerSize + 8) continue;
+
+        const tfhdBody = tfhd.start + tfhd.headerSize;
+        const tfhdFlags =
+          (view.getUint8(tfhdBody + 1) << 16) |
+          (view.getUint8(tfhdBody + 2) << 8) |
+          view.getUint8(tfhdBody + 3);
+        const trackId = view.getUint32(tfhdBody + 4, false);
+        if (trackId !== videoTrackId) continue;
+
+        let tfhdPos = tfhdBody + 8;
+        let baseDataOffset = offset; // default-base-is-moof / moof start
+        if (tfhdFlags & 0x000001) {
+          baseDataOffset = readUint64(view, tfhdPos);
+          tfhdPos += 8;
+        }
+        if (tfhdFlags & 0x000002) {
+          tfhdPos += 4; // sample_description_index
+        }
+        let defaultDuration = trex.defaultSampleDuration;
+        if (tfhdFlags & 0x000008) {
+          defaultDuration = view.getUint32(tfhdPos, false);
+          tfhdPos += 4;
+        }
+        let defaultSize = trex.defaultSampleSize;
+        if (tfhdFlags & 0x000010) {
+          defaultSize = view.getUint32(tfhdPos, false);
+          tfhdPos += 4;
+        }
+        let defaultFlags = trex.defaultSampleFlags;
+        if (tfhdFlags & 0x000020) {
+          defaultFlags = view.getUint32(tfhdPos, false);
+          tfhdPos += 4;
+        }
+
+        // tfdt (track fragment decode time)
+        const tfdt = trafChildren.find((b) => b.type === 'tfdt');
+        let decodeTime = runningDecodeTime;
+        if (tfdt && tfdt.size >= tfdt.headerSize + 8) {
+          const tfdtBody = tfdt.start + tfdt.headerSize;
+          const tfdtVer = view.getUint8(tfdtBody);
+          if (tfdtVer === 1 && tfdt.size >= tfdt.headerSize + 12) {
+            decodeTime = readUint64(view, tfdtBody + 4);
+          } else {
+            decodeTime = view.getUint32(tfdtBody + 4, false);
+          }
+        }
+
+        let currentDataOffset = baseDataOffset;
+        for (const trun of trafChildren) {
+          if (trun.type !== 'trun' || trun.size < trun.headerSize + 8) continue;
+          const trunBody = trun.start + trun.headerSize;
+          const trunVer = view.getUint8(trunBody);
+          const trunFlags =
+            (view.getUint8(trunBody + 1) << 16) |
+            (view.getUint8(trunBody + 2) << 8) |
+            view.getUint8(trunBody + 3);
+          const sampleCount = view.getUint32(trunBody + 4, false);
+          let pos = trunBody + 8;
+
+          if (trunFlags & 0x000001) {
+            const dataOffset = view.getInt32(pos, false);
+            currentDataOffset = baseDataOffset + dataOffset;
+            pos += 4;
+          }
+          let firstSampleFlags: number | null = null;
+          if (trunFlags & 0x000004) {
+            firstSampleFlags = view.getUint32(pos, false);
+            pos += 4;
+          }
+
+          const hasDur = Boolean(trunFlags & 0x000100);
+          const hasSize = Boolean(trunFlags & 0x000200);
+          const hasFlags = Boolean(trunFlags & 0x000400);
+          const hasCto = Boolean(trunFlags & 0x000800);
+
+          const trunEnd = trun.start + trun.size;
+          for (let i = 0; i < sampleCount; i++) {
+            const needed = (hasDur ? 4 : 0) + (hasSize ? 4 : 0) + (hasFlags ? 4 : 0) + (hasCto ? 4 : 0);
+            if (pos + needed > trunEnd) break;
+
+            const dur = hasDur ? view.getUint32(pos, false) : defaultDuration;
+            if (hasDur) pos += 4;
+            const size = hasSize ? view.getUint32(pos, false) : defaultSize;
+            if (hasSize) pos += 4;
+            let flags = defaultFlags;
+            if (hasFlags) {
+              flags = view.getUint32(pos, false);
+              pos += 4;
+            } else if (i === 0 && firstSampleFlags !== null) {
+              flags = firstSampleFlags;
+            }
+            let cto = 0;
+            if (hasCto) {
+              cto = trunVer === 1 ? view.getInt32(pos, false) : view.getUint32(pos, false);
+              pos += 4;
+            }
+
+            const pts = decodeTime + cto;
+            if (pts < minPts) minPts = pts;
+
+            // ISO 14496-12: bit 16 (0x00010000) is sample_is_non_sync_sample
+            // bits 24..25 (0x03000000): sample_depends_on === 2 means does not depend on others (I-frame)
+            const isNonSync = (flags & 0x00010000) !== 0;
+            const dependsOn = (flags >>> 24) & 0x03;
+            const isKey = rawSamples.length === 0 || (!isNonSync && dependsOn !== 1);
+
+            rawSamples.push({
+              type: isKey ? 'key' : 'delta',
+              pts,
+              dur: dur || Math.round(timescale / 30),
+              offset: currentDataOffset,
+              size,
+            });
+
+            currentDataOffset += size;
+            decodeTime += dur || Math.round(timescale / 30);
+          }
+        }
+        runningDecodeTime = decodeTime;
+      }
+    }
+
+    offset += boxSize;
+  }
+
+  if (rawSamples.length === 0) return null;
+
+  const basePts = Number.isFinite(minPts) ? minPts : 0;
+  const samples: DemuxedSample[] = rawSamples.map((s, idx) => ({
+    type: idx === 0 ? 'key' : s.type,
+    timestampUs: Math.max(0, Math.round(((s.pts - basePts) * 1_000_000) / timescale)),
+    durationUs: Math.max(1, Math.round((s.dur * 1_000_000) / timescale)),
+    offset: s.offset,
+    size: s.size,
+  }));
+
+  const durationSeconds =
+    runningDecodeTime > basePts
+      ? (runningDecodeTime - basePts) / timescale
+      : rawSamples.reduce((acc, s) => acc + s.dur, 0) / timescale;
+
+  return { samples, durationSeconds: Math.max(0.05, durationSeconds) };
+}
+
+/**
+ * Demuxes the primary video track sample table from a standard or fragmented MP4/MOV Blob
+ * without loading `mdat`. Returns `null` for non-MP4 or unsupported codecs so caller can fallback.
  */
 export async function demuxMp4VideoTrack(blob: Blob): Promise<DemuxedVideoTrack | null> {
   try {
@@ -209,14 +413,40 @@ export async function demuxMp4VideoTrack(blob: Blob): Promise<DemuxedVideoTrack 
     const view = new DataView(moovBytes.buffer, moovBytes.byteOffset, moovBytes.byteLength);
     const moovChildren = iterChildBoxes(view, moovBox.headerSize, moovBytes.byteLength);
 
-    // Bail out on fragmented MP4 (`mvex`) since samples live in `moof` boxes
-    if (moovChildren.some((b) => b.type === 'mvex')) {
-      return null;
+    // Parse optional `mvex` -> `trex` defaults for fragmented MP4s (e.g. YouTube/DASH AV1)
+    const trexByTrackId = new Map<number, TrexDefaults>();
+    const mvex = moovChildren.find((b) => b.type === 'mvex');
+    if (mvex) {
+      const mvexChildren = iterChildBoxes(view, mvex.start + mvex.headerSize, mvex.start + mvex.size);
+      for (const box of mvexChildren) {
+        if (box.type === 'trex' && box.size >= box.headerSize + 24) {
+          const body = box.start + box.headerSize;
+          const trackId = view.getUint32(body + 4, false);
+          trexByTrackId.set(trackId, {
+            defaultSampleDuration: view.getUint32(body + 12, false),
+            defaultSampleSize: view.getUint32(body + 16, false),
+            defaultSampleFlags: view.getUint32(body + 20, false),
+          });
+        }
+      }
     }
 
     for (const trak of moovChildren) {
       if (trak.type !== 'trak') continue;
       const trakChildren = iterChildBoxes(view, trak.start + trak.headerSize, trak.start + trak.size);
+
+      // Extract trackId from tkhd for fragmented MP4 matching
+      let videoTrackId = 1;
+      const tkhd = trakChildren.find((b) => b.type === 'tkhd');
+      if (tkhd && tkhd.size >= tkhd.headerSize + 24) {
+        const tkhdBody = tkhd.start + tkhd.headerSize;
+        const tkhdVer = view.getUint8(tkhdBody);
+        videoTrackId =
+          tkhdVer === 1
+            ? view.getUint32(tkhdBody + 20, false)
+            : view.getUint32(tkhdBody + 12, false);
+      }
+
       const mdia = trakChildren.find((b) => b.type === 'mdia');
       if (!mdia) continue;
 
@@ -278,7 +508,8 @@ export async function demuxMp4VideoTrack(blob: Blob): Promise<DemuxedVideoTrack 
           ? moovBytes.slice(av1C.start + av1C.headerSize, av1C.start + av1C.size)
           : new Uint8Array(0);
         codec = buildAv1CodecString(payload);
-        if (payload.byteLength >= 4) description = payload;
+        // Per W3C WebCodecs AV1 Codec Registration, description is omitted (OBUs are in-band)
+        description = undefined;
       } else if (fourcc === 'avc1' || fourcc === 'avc3') {
         const avcC = configBoxes.find((b) => b.type === 'avcC');
         if (!avcC) continue;
@@ -297,18 +528,44 @@ export async function demuxMp4VideoTrack(blob: Blob): Promise<DemuxedVideoTrack 
           ? moovBytes.slice(vpcC.start + vpcC.headerSize, vpcC.start + vpcC.size)
           : new Uint8Array(0);
         codec = buildVp9CodecString(payload);
-        if (payload.byteLength >= 7) description = payload;
+        description = undefined;
       } else {
         continue; // Unsupported codec for direct VideoDecoder demuxing
       }
 
       // Parse stsz (sample sizes)
       const stsz = stblChildren.find((b) => b.type === 'stsz');
-      if (!stsz) continue;
-      const stszBody = stsz.start + stsz.headerSize;
-      const fixedSampleSize = view.getUint32(stszBody + 4, false);
-      const sampleCount = view.getUint32(stszBody + 8, false);
-      if (sampleCount === 0 || sampleCount > 2_000_000) continue;
+      const stszBody = stsz ? stsz.start + stsz.headerSize : 0;
+      const fixedSampleSize = stsz ? view.getUint32(stszBody + 4, false) : 0;
+      const sampleCount = stsz ? view.getUint32(stszBody + 8, false) : 0;
+
+      // Fragmented MP4 path (when moov stsz has 0 samples and mvex/moof fragments hold the samples)
+      if (sampleCount === 0 && mvex) {
+        const trex = trexByTrackId.get(videoTrackId) || {
+          defaultSampleDuration: Math.round(timescale / 30),
+          defaultSampleSize: 0,
+          defaultSampleFlags: 0,
+        };
+        const frag = await parseFragmentedSamples(blob, videoTrackId, timescale, trex);
+        if (!frag || frag.samples.length === 0) continue;
+        const fps =
+          frag.durationSeconds > 0
+            ? Math.max(1, Math.round((frag.samples.length / frag.durationSeconds) * 100) / 100)
+            : 30;
+        return {
+          codec,
+          fourcc,
+          codedWidth,
+          codedHeight,
+          timescale,
+          durationSeconds: frag.durationSeconds,
+          fps,
+          description,
+          samples: frag.samples,
+        };
+      }
+
+      if (!stsz || sampleCount === 0 || sampleCount > 2_000_000) continue;
 
       const sampleSizes = new Uint32Array(sampleCount);
       if (fixedSampleSize > 0) {
@@ -356,12 +613,12 @@ export async function demuxMp4VideoTrack(blob: Blob): Promise<DemuxedVideoTrack 
       }
       if (stscRuns.length === 0) continue;
 
-      // Compute sample byte offsets from stsc + stco/co64 + stsz
+      // Compute sample byte offsets in O(C + R) linear time
       const sampleOffsets = new Float64Array(sampleCount);
       let sIdx = 0;
+      let runIdx = 0;
       for (let c = 0; c < chunkOffsets.length && sIdx < sampleCount; c++) {
         const chunkNum1 = c + 1;
-        let runIdx = 0;
         while (runIdx + 1 < stscRuns.length && stscRuns[runIdx + 1].firstChunk <= chunkNum1) {
           runIdx++;
         }
