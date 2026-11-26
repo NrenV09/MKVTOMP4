@@ -325,9 +325,15 @@ async function parseFragmentedSamples(
 
             // ISO 14496-12: bit 16 (0x00010000) is sample_is_non_sync_sample
             // bits 24..25 (0x03000000): sample_depends_on === 2 means does not depend on others (I-frame)
+            const hasExplicitFlags =
+              hasFlags ||
+              (i === 0 && firstSampleFlags !== null) ||
+              (tfhdFlags & 0x000020) !== 0 ||
+              trex.defaultSampleFlags !== 0;
             const isNonSync = (flags & 0x00010000) !== 0;
             const dependsOn = (flags >>> 24) & 0x03;
-            const isKey = rawSamples.length === 0 || (!isNonSync && dependsOn !== 1);
+            const isKey =
+              rawSamples.length === 0 || (hasExplicitFlags && !isNonSync && dependsOn !== 1);
 
             rawSamples.push({
               type: isKey ? 'key' : 'delta',
@@ -508,8 +514,8 @@ export async function demuxMp4VideoTrack(blob: Blob): Promise<DemuxedVideoTrack 
           ? moovBytes.slice(av1C.start + av1C.headerSize, av1C.start + av1C.size)
           : new Uint8Array(0);
         codec = buildAv1CodecString(payload);
-        // Per W3C WebCodecs AV1 Codec Registration, description is omitted (OBUs are in-band)
-        description = undefined;
+        // Preserve av1C record when present so hardwareEngine can try both with/without configOBUs
+        description = payload.byteLength >= 4 ? payload : undefined;
       } else if (fourcc === 'avc1' || fourcc === 'avc3') {
         const avcC = configBoxes.find((b) => b.type === 'avcC');
         if (!avcC) continue;

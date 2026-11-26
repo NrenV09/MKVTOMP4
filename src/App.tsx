@@ -914,7 +914,14 @@ export default function App() {
       const isTargetAv1 = isVideoTarget && config.videoCodec === 'av01';
       const isSourceAv1 =
         (effectiveMeta.videoCodec || '').toLowerCase().includes('av1') ||
-        (effectiveMeta.videoCodec || '').toLowerCase().includes('av01');
+        (effectiveMeta.videoCodec || '').toLowerCase().includes('av01') ||
+        Boolean(
+          effectiveMeta.videoTracks?.some((v) => {
+            const c = v.codec.toLowerCase();
+            return c.includes('av1') || c.includes('av01');
+          })
+        ) ||
+        ['.av1', '.obu'].includes(extIn.toLowerCase());
       const isHwContainer = config.container === 'mp4' || config.container === 'mov';
       const isAv1MuxContainer =
         config.container === 'mp4' ||
@@ -938,6 +945,10 @@ export default function App() {
         );
       }
 
+      const liveWebCodecsAvailable =
+        typeof VideoDecoder !== 'undefined' && typeof VideoEncoder !== 'undefined';
+      const hasAnyWebCodecs = Boolean(hardwareCaps?.webcodecs.available || liveWebCodecsAvailable);
+
       const canHardwareWebCodecs =
         rawFile.size <= hwMaxBytes &&
         isVideoTarget &&
@@ -945,17 +956,17 @@ export default function App() {
         isWebCodecsTargetCodec &&
         ((isTargetAv1 &&
           isAv1MuxContainer &&
-          Boolean(hardwareCaps?.webcodecs.av1Available || hardwareCaps?.webcodecs.available)) ||
+          Boolean(hardwareCaps?.webcodecs.av1Available || hasAnyWebCodecs)) ||
           (isSourceAv1 &&
             isDirectWebCodecsContainerForCodec &&
-            Boolean(hardwareCaps?.webcodecs.available)) ||
+            hasAnyWebCodecs) ||
           (isHwContainer &&
             config.hardwareAcceleration !== false &&
             config.hardwareEngine !== 'cpu' &&
             Boolean(
               hardwareCaps?.webcodecs.hwH264 ||
                 hardwareCaps?.webcodecs.hwHEVC ||
-                hardwareCaps?.webcodecs.available
+                hasAnyWebCodecs
             )));
 
       if (isTargetAv1 && !canHardwareWebCodecs) {
@@ -973,6 +984,7 @@ export default function App() {
         // DIRECT STREAM COPY (Single-pass buffered I/O + zero-copy fast-start)
         setTelemetry((prev) => ({
           ...prev,
+          percent: Math.max(prev.percent, 1),
           accelerationMode: devCaps.isAndroid
             ? `Direct Stream Copy (${devCaps.chipLabel})`
             : 'Direct Stream Copy (Single-Pass Zero-Copy)',
@@ -1139,6 +1151,7 @@ export default function App() {
 
         setTelemetry((prev) => ({
           ...prev,
+          percent: Math.max(prev.percent, 1),
           accelerationMode: gpuEngineLabel,
         }));
         addLog('system', `Initializing WebCodecs pipeline (${gpuEngineLabel})...`);
@@ -1148,27 +1161,44 @@ export default function App() {
         if (['.webm', '.mkv', '.avi', '.flv', '.ts', '.m2ts', '.mts', '.ivf', '.av1', '.obu'].includes(lowerExtIn)) {
           addLog('system', 'Pre-flight stream remuxing into MP4 sample table for zero-seek WebCodecs VideoDecoder...');
           const tempRemuxOut = `temp_hw_remux_${Date.now()}.mp4`;
-          const remuxArgs = [
-            '-hide_banner',
-            '-nostdin',
-            '-threads',
-            '1',
-            '-fflags',
-            '+genpts',
-            '-i',
-            virtualIn,
-            '-c:v',
-            'copy',
-            ...(isSourceAv1 ? ['-tag:v', 'av01'] : []),
-            '-an',
-            '-sn',
-            '-dn',
-            tempRemuxOut,
-          ];
-          const remuxCode = await ffmpeg.exec(remuxArgs);
+          const runPreFlightRemux = async (useAv01Tag: boolean): Promise<number> => {
+            const args = [
+              '-hide_banner',
+              '-nostdin',
+              '-threads',
+              '1',
+              '-fflags',
+              '+genpts',
+              '-i',
+              virtualIn,
+              '-c:v',
+              'copy',
+              ...(useAv01Tag ? ['-tag:v', 'av01'] : []),
+              '-an',
+              '-sn',
+              '-dn',
+              tempRemuxOut,
+            ];
+            return ffmpeg.exec(args);
+          };
+
+          let remuxCode = await runPreFlightRemux(isSourceAv1);
+          if (remuxCode !== 0 && isSourceAv1) {
+            try { await ffmpeg.deleteFile(tempRemuxOut); } catch {}
+            remuxCode = await runPreFlightRemux(false);
+          }
+
           if (remuxCode === 0) {
             sourceBlobForHw = await readOutputAsBlob(tempRemuxOut, 'video/mp4', true);
             try { await ffmpeg.deleteFile(tempRemuxOut); } catch {}
+          } else {
+            try { await ffmpeg.deleteFile(tempRemuxOut); } catch {}
+            if (['.ivf', '.av1', '.obu'].includes(lowerExtIn)) {
+              throw new Error(
+                `Failed to repackage raw ${lowerExtIn.toUpperCase()} AV1 bitstream into an MP4 sample table for WebCodecs decoding (exit code ${remuxCode}).`
+              );
+            }
+            addLog('system', 'Pre-flight remux skipped; falling back to direct container decoding.');
           }
         }
 
@@ -1458,7 +1488,7 @@ export default function App() {
           config.targetCategory === 'video' &&
           config.videoCodec !== 'copy' &&
           rawFile.size <= hwMaxBytes &&
-          Boolean(hardwareCaps?.webcodecs.available);
+          hasAnyWebCodecs;
 
         if (needsAv1DecodeBridge) {
           addLog(
@@ -1467,6 +1497,7 @@ export default function App() {
           );
           setTelemetry((prev) => ({
             ...prev,
+            percent: Math.max(prev.percent, 1),
             accelerationMode: 'WebCodecs AV1 Decode Bridge + FFmpeg',
           }));
 
@@ -1474,26 +1505,33 @@ export default function App() {
           const lowerExtIn = extIn.toLowerCase();
           if (['.webm', '.mkv', '.avi', '.flv', '.ts', '.m2ts', '.mts', '.ivf', '.av1', '.obu'].includes(lowerExtIn)) {
             const tempRemuxOut = `temp_av1_bridge_remux_${Date.now()}.mp4`;
-            const remuxCode = await ffmpeg.exec([
-              '-hide_banner',
-              '-nostdin',
-              '-threads',
-              '1',
-              '-fflags',
-              '+genpts',
-              '-i',
-              virtualIn,
-              '-c:v',
-              'copy',
-              '-tag:v',
-              'av01',
-              '-an',
-              '-sn',
-              '-dn',
-              tempRemuxOut,
-            ]);
+            const runBridgeRemux = async (useTag: boolean) =>
+              ffmpeg.exec([
+                '-hide_banner',
+                '-nostdin',
+                '-threads',
+                '1',
+                '-fflags',
+                '+genpts',
+                '-i',
+                virtualIn,
+                '-c:v',
+                'copy',
+                ...(useTag ? ['-tag:v', 'av01'] : []),
+                '-an',
+                '-sn',
+                '-dn',
+                tempRemuxOut,
+              ]);
+            let remuxCode = await runBridgeRemux(true);
+            if (remuxCode !== 0) {
+              try { await ffmpeg.deleteFile(tempRemuxOut); } catch {}
+              remuxCode = await runBridgeRemux(false);
+            }
             if (remuxCode === 0) {
               bridgeSourceBlob = await readOutputAsBlob(tempRemuxOut, 'video/mp4', true);
+              try { await ffmpeg.deleteFile(tempRemuxOut); } catch {}
+            } else {
               try { await ffmpeg.deleteFile(tempRemuxOut); } catch {}
             }
           }
