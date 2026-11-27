@@ -637,6 +637,7 @@ export function buildFFmpegArgs(
 
     // Rate control (Target Size MB, CRF, or explicit Bitrate)
     if (
+      config.compressEnabled !== false &&
       config.compressionPreset === 'target-size' &&
       config.targetSizeMB &&
       config.targetSizeMB > 0 &&

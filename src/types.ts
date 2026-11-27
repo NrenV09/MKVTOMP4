@@ -150,6 +150,7 @@ export interface EncodingConfig {
   rateControl: RateControlMode;
   crf: number; // 18 - 35
   videoBitrate: string; // e.g. "2500k", "5000k"
+  compressEnabled?: boolean;
   compressionPreset?: CompressionPreset;
   targetSizeMB?: number;
   resolution: ResolutionPreset;

@@ -88,6 +88,7 @@ const DEFAULT_CONFIG: EncodingConfig = {
   fastStart: true,
   hardwareAcceleration: true,
   hardwareEngine: 'auto',
+  compressEnabled: false,
 };
 
 export default function App() {
@@ -501,6 +502,7 @@ export default function App() {
         preserveMetadataTags: true,
         speedPreset: 'ultrafast',
         fastStart: true,
+        compressEnabled: false,
         selectedVideoTrackIndices: undefined,
         selectedAudioTrackIndices: undefined,
         selectedSubtitleTrackIndices: undefined,
@@ -615,6 +617,7 @@ export default function App() {
               selectedSubtitleTrackIndices: defaultSubIndices,
               hardwareAcceleration: true,
               hardwareEngine: 'stream-copy',
+              compressEnabled: false,
             }));
             addLog(
               'system',
@@ -635,6 +638,7 @@ export default function App() {
               selectedSubtitleTrackIndices: defaultSubIndices,
               hardwareAcceleration: true,
               hardwareEngine: 'webgpu',
+              compressEnabled: false,
             }));
             addLog(
               'system',
@@ -1124,7 +1128,7 @@ export default function App() {
         if (returnCode !== 0) {
           throw new Error(
             isSourceAv1
-              ? `AV1 (av01) stream copy into .${config.container.toUpperCase()} failed. Switch mode to Compress (GPU) or AV1 (av01) to convert.`
+              ? `AV1 (av01) stream copy into .${config.container.toUpperCase()} failed. Select H.264, HEVC, or AV1 (av01) in Codec Converter to transcode.`
               : `Conversion exited with code ${returnCode}. Check console logs for stream details.`
           );
         }
@@ -1765,10 +1769,16 @@ export default function App() {
       const baseName = sourceMeta.name.replace(/\.[^/.]+$/, '');
       const outputSuffix = isCopy
         ? '_remuxed'
+        : isVideoTarget && config.compressEnabled
+        ? '_compressed'
         : isTargetAv1
         ? '_av1'
-        : isVideoTarget
-        ? '_compressed'
+        : isVideoTarget && config.videoCodec === 'libx264'
+        ? '_h264'
+        : isVideoTarget && config.videoCodec === 'libx265'
+        ? '_hevc'
+        : isVideoTarget && config.videoCodec === 'libvpx-vp9'
+        ? '_vp9'
         : '_converted';
       const finalOutputName = `${baseName}${outputSuffix}${extOut}`;
       const elapsed = Date.now() - startTimeRef.current;
@@ -1966,6 +1976,7 @@ export default function App() {
                         source={sourceMeta}
                         disabled={isConverting}
                         hardwareCaps={hardwareCaps}
+                        compact
                       />
 
                       <div className="cyber-panel rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xl">
@@ -1981,22 +1992,41 @@ export default function App() {
                               </span>
                             </div>
                             <div className="text-xs text-zinc-400 font-mono mt-0.5">
-                              {config.targetCategory === 'video' && config.container !== 'gif'
-                                ? config.videoCodec === 'copy'
-                                  ? 'Remux (Direct stream copy)'
-                                  : config.videoCodec === 'av01'
-                                  ? hardwareCaps?.webcodecs.hwAV1 && config.hardwareAcceleration !== false
-                                    ? 'Compress (Hardware GPU • AV1 av01)'
-                                    : 'Compress (WebCodecs • AV1 av01)'
-                                  : config.hardwareAcceleration !== false &&
-                                    config.hardwareEngine !== 'cpu' &&
-                                    (config.container === 'mp4' || config.container === 'mov') &&
-                                    (hardwareCaps?.webcodecs.hwH264 ||
-                                      hardwareCaps?.webcodecs.hwHEVC ||
-                                      hardwareCaps?.webcodecs.available)
-                                  ? `Compress (Hardware GPU • ${config.videoCodec === 'libx265' ? 'HEVC' : 'H.264'})`
-                                  : `Compress (CPU • ${config.speedPreset})`
-                                : `Convert to .${config.container.toUpperCase()}`}
+                              {(() => {
+                                if (config.targetCategory !== 'video' || config.container === 'gif') {
+                                  return `Convert to .${config.container.toUpperCase()}`;
+                                }
+                                if (config.videoCodec === 'copy') {
+                                  return 'Remux · Direct stream copy';
+                                }
+                                const codecLabel =
+                                  config.videoCodec === 'av01'
+                                    ? 'AV1 av01'
+                                    : config.videoCodec === 'libx265'
+                                    ? 'HEVC'
+                                    : config.videoCodec === 'libvpx-vp9'
+                                    ? 'VP9'
+                                    : 'H.264';
+                                const useHw =
+                                  config.videoCodec === 'av01'
+                                    ? hardwareCaps?.webcodecs.hwAV1 && config.hardwareAcceleration !== false
+                                    : config.hardwareAcceleration !== false &&
+                                      config.hardwareEngine !== 'cpu' &&
+                                      (config.container === 'mp4' || config.container === 'mov') &&
+                                      (hardwareCaps?.webcodecs.hwH264 ||
+                                        hardwareCaps?.webcodecs.hwHEVC ||
+                                        hardwareCaps?.webcodecs.available);
+                                const engineLabel =
+                                  config.videoCodec === 'av01'
+                                    ? useHw
+                                      ? 'Hardware GPU'
+                                      : 'WebCodecs'
+                                    : useHw
+                                    ? 'Hardware GPU'
+                                    : `CPU · ${config.speedPreset}`;
+                                const modeLabel = config.compressEnabled ? 'Convert + Compress' : 'Codec Convert';
+                                return `${modeLabel} · ${codecLabel} (${engineLabel})`;
+                              })()}
                             </div>
                           </div>
                         </div>
@@ -2004,7 +2034,7 @@ export default function App() {
                         <button
                           onClick={handleStartConversion}
                           disabled={!rawFile || isConverting || engineLoading}
-                          className="cyber-btn-primary w-full sm:w-auto px-6 py-3 rounded-xl text-xs transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                          className="cyber-btn-primary w-full sm:w-auto px-6 py-3 rounded-xl text-xs transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 whitespace-nowrap shrink-0"
                         >
                           {engineLoading ? (
                             <>
@@ -2013,13 +2043,26 @@ export default function App() {
                             </>
                           ) : (
                             <span>
-                              {config.targetCategory === 'video' && config.container !== 'gif'
-                                ? config.videoCodec === 'copy'
-                                  ? `Remux to .${config.container.toUpperCase()}`
-                                  : config.videoCodec === 'av01'
-                                  ? `Convert to AV1 (.${config.container.toUpperCase()})`
-                                  : `Compress to .${config.container.toUpperCase()}`
-                                : `Convert to .${config.container.toUpperCase()}`}
+                              {(() => {
+                                const extLabel = config.container.toUpperCase();
+                                if (config.targetCategory !== 'video' || config.container === 'gif') {
+                                  return `Convert to .${extLabel}`;
+                                }
+                                if (config.videoCodec === 'copy') {
+                                  return `Remux to .${extLabel}`;
+                                }
+                                const codecShort =
+                                  config.videoCodec === 'av01'
+                                    ? 'AV1'
+                                    : config.videoCodec === 'libx265'
+                                    ? 'HEVC'
+                                    : config.videoCodec === 'libvpx-vp9'
+                                    ? 'VP9'
+                                    : 'H.264';
+                                return config.compressEnabled
+                                  ? `Convert & Compress (${codecShort})`
+                                  : `Convert to ${codecShort} (.${extLabel})`;
+                              })()}
                             </span>
                           )}
                         </button>
@@ -2108,24 +2151,45 @@ export default function App() {
                             </span>
                           </div>
                           <div className="text-xs text-zinc-400 font-mono mt-0.5">
-                            {config.targetCategory === 'video' && config.container !== 'gif'
-                              ? config.videoCodec === 'copy' && config.audioCodec === 'copy'
-                                ? 'Remux (Direct copy, no re-encoding)'
-                                : config.videoCodec === 'copy'
-                                ? 'Remux (Video copy + audio convert)'
-                                : config.videoCodec === 'av01'
-                                ? hardwareCaps?.webcodecs.hwAV1 && config.hardwareAcceleration !== false
-                                  ? 'Compress (Hardware GPU • AV1 av01)'
-                                  : 'Compress (WebCodecs • AV1 av01)'
-                                : config.hardwareAcceleration !== false &&
-                                  config.hardwareEngine !== 'cpu' &&
-                                  (config.container === 'mp4' || config.container === 'mov') &&
-                                  (hardwareCaps?.webcodecs.hwH264 ||
-                                    hardwareCaps?.webcodecs.hwHEVC ||
-                                    hardwareCaps?.webcodecs.available)
-                                ? `Compress (Hardware GPU • ${config.videoCodec === 'libx265' ? 'HEVC' : 'H.264'})`
-                                : `Compress (CPU • ${config.speedPreset})`
-                              : `Convert to .${config.container.toUpperCase()}`}
+                            {(() => {
+                              if (config.targetCategory !== 'video' || config.container === 'gif') {
+                                return `Convert to .${config.container.toUpperCase()}`;
+                              }
+                              if (config.videoCodec === 'copy') {
+                                return config.audioCodec === 'copy'
+                                  ? 'Remux · Direct copy, no re-encoding'
+                                  : 'Remux · Video copy + audio convert';
+                              }
+                              const codecLabel =
+                                config.videoCodec === 'av01'
+                                  ? 'AV1 av01'
+                                  : config.videoCodec === 'libx265'
+                                  ? 'HEVC'
+                                  : config.videoCodec === 'libvpx-vp9'
+                                  ? 'VP9'
+                                  : 'H.264';
+                              const useHw =
+                                config.videoCodec === 'av01'
+                                  ? hardwareCaps?.webcodecs.hwAV1 && config.hardwareAcceleration !== false
+                                  : config.hardwareAcceleration !== false &&
+                                    config.hardwareEngine !== 'cpu' &&
+                                    (config.container === 'mp4' || config.container === 'mov') &&
+                                    (hardwareCaps?.webcodecs.hwH264 ||
+                                      hardwareCaps?.webcodecs.hwHEVC ||
+                                      hardwareCaps?.webcodecs.available);
+                              const engineLabel =
+                                config.videoCodec === 'av01'
+                                  ? useHw
+                                    ? 'Hardware GPU'
+                                    : 'WebCodecs'
+                                  : useHw
+                                  ? 'Hardware GPU'
+                                  : `CPU · ${config.speedPreset}`;
+                              const modeLabel = config.compressEnabled
+                                ? 'Convert + Compress'
+                                : 'Codec Convert · Full Quality';
+                              return `${modeLabel} · ${codecLabel} (${engineLabel})`;
+                            })()}
                           </div>
                         </div>
                       </div>
@@ -2134,7 +2198,7 @@ export default function App() {
                         onClick={handleStartConversion}
                         disabled={!rawFile || isConverting || engineLoading}
                         aria-label={`Process media file to ${config.container.toUpperCase()}`}
-                        className="cyber-btn-primary w-full sm:w-auto px-8 py-3.5 rounded-xl text-sm tracking-wide transition-all flex items-center justify-center gap-2.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed hover:scale-[1.02] active:scale-[0.98] focus:outline-none"
+                        className="cyber-btn-primary w-full sm:w-auto px-8 py-3.5 rounded-xl text-sm tracking-wide transition-all flex items-center justify-center gap-2.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed hover:scale-[1.02] active:scale-[0.98] focus:outline-none whitespace-nowrap shrink-0"
                       >
                         {engineLoading ? (
                           <>
@@ -2143,13 +2207,26 @@ export default function App() {
                           </>
                         ) : (
                           <span>
-                            {config.targetCategory === 'video' && config.container !== 'gif'
-                              ? config.videoCodec === 'copy'
-                                ? `Remux to .${config.container.toUpperCase()}`
-                                : config.videoCodec === 'av01'
-                                ? `Convert to AV1 (.${config.container.toUpperCase()})`
-                                : `Compress to .${config.container.toUpperCase()}`
-                              : `Convert to .${config.container.toUpperCase()}`}
+                            {(() => {
+                              const extLabel = config.container.toUpperCase();
+                              if (config.targetCategory !== 'video' || config.container === 'gif') {
+                                return `Convert to .${extLabel}`;
+                              }
+                              if (config.videoCodec === 'copy') {
+                                return `Remux to .${extLabel}`;
+                              }
+                              const codecShort =
+                                config.videoCodec === 'av01'
+                                  ? 'AV1'
+                                  : config.videoCodec === 'libx265'
+                                  ? 'HEVC'
+                                  : config.videoCodec === 'libvpx-vp9'
+                                  ? 'VP9'
+                                  : 'H.264';
+                              return config.compressEnabled
+                                ? `Convert & Compress (${codecShort})`
+                                : `Convert to ${codecShort} (.${extLabel})`;
+                            })()}
                           </span>
                         )}
                       </button>

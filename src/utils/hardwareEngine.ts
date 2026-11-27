@@ -158,9 +158,11 @@ export function computeTargetVideoBitrateBps(
 ): number {
   const duration = source?.duration && source.duration > 0 ? source.duration : 0;
   const audioBps = parseAudioBitrateBps(config, source);
+  const isCompressing = config.compressEnabled !== false;
 
-  // 1. Target Size (MB) mode
+  // 1. Target Size (MB) mode (only when video compressor is enabled)
   if (
+    isCompressing &&
     config.compressionPreset === 'target-size' &&
     config.targetSizeMB &&
     config.targetSizeMB > 0 &&
@@ -192,7 +194,10 @@ export function computeTargetVideoBitrateBps(
       : Math.min(60, Math.max(24, source?.fps || 30));
 
   // Baseline H.264 CRF 23 ≈ 0.06 bits/pixel-frame (~3.7 Mbps at 1080p30, ~1.65 Mbps at 720p30)
-  const crf = Math.min(34, Math.max(16, config.crf || 23));
+  // When converting codecs without compression, target high visual fidelity (CRF ~19)
+  const crf = isCompressing
+    ? Math.min(34, Math.max(16, config.crf || 23))
+    : Math.min(22, Math.max(16, config.crf || 19));
   const crfFactor = Math.pow(2, (23 - crf) / 6);
   const codecFactor =
     config.videoCodec === 'av01'
@@ -205,7 +210,7 @@ export function computeTargetVideoBitrateBps(
 
   let estimatedBps = Math.round(width * height * fps * 0.06 * crfFactor * codecFactor);
 
-  // Estimate source video bitrate so compressing an already-compressed clip actually shrinks it
+  // Estimate source video bitrate
   let sourceTotalBps = 0;
   if (source?.bitrate && source.bitrate > 0) {
     sourceTotalBps = source.bitrate * 1000; // probe.ts stores bitrate in kb/s
@@ -213,7 +218,7 @@ export function computeTargetVideoBitrateBps(
     sourceTotalBps = Math.round((source.size * 8) / duration);
   }
 
-  if (sourceTotalBps > 0) {
+  if (sourceTotalBps > 0 && isCompressing) {
     const sourceVideoBps = Math.max(250_000, sourceTotalBps - audioBps);
     const maxRatio =
       config.compressionPreset === 'strong' || crf >= 28
