@@ -14,7 +14,11 @@ export const ProgressEngine: React.FC<ProgressEngineProps> = ({
   onCancel,
   outputName,
 }) => {
-  const percent = Math.min(100, Math.max(0, Math.round(telemetry.percent)));
+  const rawPercent = Math.min(100, Math.max(0, telemetry.percent));
+  const percentLabel =
+    rawPercent > 0 && rawPercent < 10
+      ? rawPercent.toFixed(1)
+      : String(Math.round(rawPercent));
 
   return (
     <div className="cyber-panel rounded-xl p-5 font-mono text-xs space-y-4 shadow-2xl">
@@ -49,14 +53,14 @@ export const ProgressEngine: React.FC<ProgressEngineProps> = ({
         <div className="flex justify-between items-baseline text-xs">
           <span className="text-zinc-400">Progress</span>
           <span className="text-2xl font-black font-mono text-cyan-300 cyber-glow-text">
-            {percent}%
+            {percentLabel}%
           </span>
         </div>
 
         <div className="w-full bg-[#04060c] rounded-full h-3 p-0.5 border border-cyan-500/30 overflow-hidden">
           <div
             className="h-full rounded-full transition-all duration-300 ease-out bg-gradient-to-r from-cyan-400 via-emerald-400 to-cyan-300"
-            style={{ width: `${percent}%` }}
+            style={{ width: `${rawPercent}%` }}
           />
         </div>
       </div>

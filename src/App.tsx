@@ -145,6 +145,20 @@ export default function App() {
     sourceMetaRef.current = sourceMeta;
   }, [sourceMeta]);
 
+  useEffect(() => {
+    if (!isConverting) return;
+    const id = window.setInterval(() => {
+      if (startTimeRef.current > 0) {
+        const elapsed = Date.now() - startTimeRef.current;
+        setTelemetry((prev) => ({
+          ...prev,
+          elapsedMs: elapsed,
+        }));
+      }
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [isConverting]);
+
   const addLog = useCallback((type: 'stdout' | 'stderr' | 'system' | 'error', text: string) => {
     const time = new Date().toTimeString().split(' ')[0] + '.' + String(new Date().getMilliseconds()).padStart(3, '0');
     setLogs((prev) => [
@@ -1271,11 +1285,12 @@ export default function App() {
             fastStart: !needsFinalMux && useZeroCopyFastStart,
             webgpuFilter: config.webgpuFilter,
             signal: hwAbortController.current.signal,
+            onLog: (msg) => addLog('system', msg),
             onProgress: (p) => {
               const now = Date.now();
               const elapsed = now - startTimeRef.current;
               const remainingSec =
-                p.percent > 1 ? (elapsed / (p.percent / 100) - elapsed) / 1000 : null;
+                p.percent > 0.2 ? (elapsed / (p.percent / 100) - elapsed) / 1000 : null;
               setTelemetry({
                 percent: needsFinalMux ? Math.min(94, p.percent * 0.94) : p.percent,
                 currentTime: p.currentTime,
@@ -1557,6 +1572,7 @@ export default function App() {
             preferHardware: true,
             fastStart: false,
             signal: hwAbortController.current.signal,
+            onLog: (msg) => addLog('system', msg),
             onProgress: (p) => {
               const elapsed = Date.now() - startTimeRef.current;
               setTelemetry((prev) => ({

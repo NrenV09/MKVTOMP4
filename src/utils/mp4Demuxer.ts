@@ -171,7 +171,7 @@ interface TrexDefaults {
 
 /**
  * Zero-copy fragmented MP4 (`moof`/`traf`/`trun`) sample table reader.
- * Scans only top-level box headers and `moof` atoms (< 8 KB each), never loading `mdat`.
+ * Uses a 64 KB read-ahead buffer for box headers & small `moof` atoms while jumping past `mdat` payloads.
  */
 async function parseFragmentedSamples(
   blob: Blob,
@@ -188,6 +188,25 @@ async function parseFragmentedSamples(
     size: number;
   }[] = [];
 
+  let bufStart = 0;
+  let bufEnd = 0;
+  let buf: Uint8Array | null = null;
+
+  const readBuffered = async (start: number, length: number): Promise<Uint8Array> => {
+    const end = Math.min(totalSize, start + length);
+    if (buf && start >= bufStart && end <= bufEnd) {
+      return buf.subarray(start - bufStart, end - bufStart);
+    }
+    if (length > 64 * 1024) {
+      return readBlobRange(blob, start, end);
+    }
+    bufStart = start;
+    bufEnd = Math.min(totalSize, start + 64 * 1024);
+    buf = await readBlobRange(blob, bufStart, bufEnd);
+    const avail = Math.min(end - start, buf.byteLength);
+    return buf.subarray(0, avail);
+  };
+
   let offset = 0;
   let guard = 0;
   let runningDecodeTime = 0;
@@ -197,15 +216,19 @@ async function parseFragmentedSamples(
 
   while (offset + 8 <= totalSize && guard < 10_000_000) {
     guard++;
+    if (guard % 500 === 0) {
+      await Promise.resolve();
+    }
     const hdrLen = Math.min(16, totalSize - offset);
-    const hdr = await readBlobRange(blob, offset, offset + hdrLen);
+    const hdr = await readBuffered(offset, hdrLen);
+    if (hdr.byteLength < 8) break;
     const hdrView = new DataView(hdr.buffer, hdr.byteOffset, hdr.byteLength);
     const size32 = hdrView.getUint32(0, false);
     const type = readFourCC(hdrView, 4);
     let boxSize = size32;
     let headerSize = 8;
     if (size32 === 1) {
-      if (hdrLen < 16) break;
+      if (hdr.byteLength < 16) break;
       boxSize = readUint64(hdrView, 8);
       headerSize = 16;
     } else if (size32 === 0) {
@@ -216,7 +239,7 @@ async function parseFragmentedSamples(
     }
 
     if (type === 'moof' && boxSize <= 16 * 1024 * 1024) {
-      const moofBytes = await readBlobRange(blob, offset, offset + boxSize);
+      const moofBytes = await readBuffered(offset, boxSize);
       const view = new DataView(moofBytes.buffer, moofBytes.byteOffset, moofBytes.byteLength);
       const moofChildren = iterChildBoxes(view, headerSize, moofBytes.byteLength);
 
@@ -361,6 +384,8 @@ async function parseFragmentedSamples(
     offset += boxSize;
   }
 
+  buf = null;
+
   if (rawSamples.length === 0) return null;
 
   const basePts = Number.isFinite(minPts) ? minPts : 0;
@@ -384,7 +409,10 @@ async function parseFragmentedSamples(
  * Demuxes the primary video track sample table from a standard or fragmented MP4/MOV Blob
  * without loading `mdat`. Returns `null` for non-MP4 or unsupported codecs so caller can fallback.
  */
-export async function demuxMp4VideoTrack(blob: Blob): Promise<DemuxedVideoTrack | null> {
+export async function demuxMp4VideoTrack(
+  blob: Blob,
+  onLog?: (message: string) => void
+): Promise<DemuxedVideoTrack | null> {
   try {
     const totalSize = blob.size;
     if (totalSize < 24) return null;
@@ -419,7 +447,10 @@ export async function demuxMp4VideoTrack(blob: Blob): Promise<DemuxedVideoTrack 
       offset += boxSize;
     }
 
-    if (!moovBox || moovBox.size > 256 * 1024 * 1024) return null;
+    if (!moovBox || moovBox.size > 256 * 1024 * 1024) {
+      onLog?.('MP4 moov atom not found or exceeds 256 MB limit; switching to media element fallback.');
+      return null;
+    }
 
     // 2. Read `moov` into memory and inspect tracks
     const moovBytes = await readBlobRange(blob, moovBox.start, moovBox.start + moovBox.size);
