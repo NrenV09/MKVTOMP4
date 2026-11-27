@@ -9,7 +9,11 @@
 import { Muxer, StreamTarget } from 'mp4-muxer';
 import { EncodingConfig, ResolutionPreset, SourceMetadata } from '../types';
 import { relocateMoovToFrontZeroCopy } from './mp4FastStart';
-import { demuxMp4VideoTrack, createSampleSliceReader } from './mp4Demuxer';
+import {
+  demuxMp4VideoTrack,
+  createSampleSliceReader,
+  sampleHasAv1SequenceHeaderObu,
+} from './mp4Demuxer';
 
 // Stub missing WebGPU types for TS compilation
 type GPUDevice = any;
@@ -478,7 +482,13 @@ export async function detectHardwareCapabilities(): Promise<HardwareCapabilities
     }
 
     // Check HEVC (H.265) hardware encoding (Apple VideoToolbox, Snapdragon/MediaTek MediaCodec)
-    for (const hevcProfile of ['hvc1.1.6.L120.90', 'hev1.1.6.L120.90']) {
+    for (const hevcProfile of [
+      'hvc1.1.6.L120.B0',
+      'hvc1.1.6.L120.90',
+      'hvc1.1.6.L93.B0',
+      'hev1.1.6.L120.B0',
+      'hev1.1.6.L120.90',
+    ]) {
       try {
         const hevcRes = await VideoEncoder.isConfigSupported({
           codec: hevcProfile,
@@ -576,6 +586,7 @@ export interface HardwareTranscodeOptions {
   fastStart?: boolean;
   webgpuFilter?: 'none' | 'grayscale';
   onProgress?: (progress: { percent: number; currentTime: number; duration: number; fps: number }) => void;
+  onStatus?: (status: string) => void;
   onLog?: (message: string) => void;
   signal?: AbortSignal;
 }
@@ -617,6 +628,8 @@ function resolveEncodeDimensions(
 interface EncoderExtraOptions {
   bitrateMode?: BitrateMode;
   latencyMode?: LatencyMode;
+  avc?: { format: 'avc' | 'annexb' };
+  hevc?: { format: 'hevc' | 'annexb' };
 }
 
 async function selectVideoEncoderProfile(
@@ -624,7 +637,8 @@ async function selectVideoEncoderProfile(
   height: number,
   bitrate: number,
   framerate: number,
-  options: HardwareTranscodeOptions
+  options: HardwareTranscodeOptions,
+  probeOpts: { preferDefaultLatency?: boolean } = {}
 ): Promise<{
   selectedCodec: string;
   selectedAccel: HardwareAcceleration;
@@ -634,12 +648,37 @@ async function selectVideoEncoderProfile(
   muxerVideoCodec: 'av1' | 'hevc' | 'avc';
   encoderConfigExtras: EncoderExtraOptions;
 }> {
-  const isAbove1080p = width * height > 1920 * 1080;
+  const pixels = width * height;
+  const isAbove1080p = pixels > 1920 * 1080;
+  const isHighFrameOrRes = isAbove1080p || (pixels >= 1920 * 1080 && framerate > 32);
+
   const av1Candidates =
-    width * height >= 2560 * 1440
+    pixels >= 2560 * 1440
       ? ['av01.0.12M.08', 'av01.0.08M.08', 'av01.0.05M.08', 'av01.0.04M.08']
       : ['av01.0.08M.08', 'av01.0.05M.08', 'av01.0.04M.08'];
-  const hevcCandidates = ['hvc1.1.6.L120.90', 'hev1.1.6.L120.90'];
+
+  // Full HEVC Main profile matrix covering 480p -> 4K60 across Safari VideoToolbox, Chrome, and MediaCodec
+  const hevcCandidates = isHighFrameOrRes
+    ? [
+        'hvc1.1.6.L153.B0',
+        'hvc1.1.6.L150.B0',
+        'hvc1.1.6.L150.90',
+        'hvc1.1.6.L123.B0',
+        'hvc1.1.6.L120.B0',
+        'hvc1.1.6.L120.90',
+        'hev1.1.6.L150.B0',
+        'hev1.1.6.L120.B0',
+        'hev1.1.6.L120.90',
+      ]
+    : [
+        'hvc1.1.6.L120.B0',
+        'hvc1.1.6.L120.90',
+        'hvc1.1.6.L93.B0',
+        'hvc1.1.6.L150.B0',
+        'hev1.1.6.L120.B0',
+        'hev1.1.6.L120.90',
+      ];
+
   // Prefer Level 4.2 High / Main / Baseline for <=1080p for broad mobile MediaCodec & desktop compatibility
   const h264Candidates = isAbove1080p
     ? ['avc1.640033', 'avc1.64002a', 'avc1.4d0029', 'avc1.42001f']
@@ -649,18 +688,37 @@ async function selectVideoEncoderProfile(
   let selectedCodec: string | null = null;
   let selectedAccel: HardwareAcceleration = wantHw ? 'prefer-hardware' : 'no-preference';
   let isHardware = wantHw;
-  let encoderConfigExtras: EncoderExtraOptions = {
-    bitrateMode: 'variable',
-    latencyMode: 'realtime',
-  };
+  let encoderConfigExtras: EncoderExtraOptions = {};
 
-  // Prefer 'realtime' latencyMode so Apple VideoToolbox / mobile hardware encoders
-  // do not stall waiting on deep B-frame lookahead buffers.
-  const extraVariants: EncoderExtraOptions[] = [
-    { bitrateMode: 'variable', latencyMode: 'realtime' },
-    { bitrateMode: 'variable' },
-    {},
-  ];
+  const buildExtrasForCodec = (candidate: string): EncoderExtraOptions[] => {
+    const isH264 = candidate.startsWith('avc1');
+    const isH265 = candidate.startsWith('hvc1') || candidate.startsWith('hev1');
+    const formatExtra: EncoderExtraOptions = isH264
+      ? { avc: { format: 'avc' } }
+      : isH265
+      ? { hevc: { format: 'hevc' } }
+      : {};
+
+    if (probeOpts.preferDefaultLatency) {
+      return [
+        { ...formatExtra, bitrateMode: 'variable' },
+        { ...formatExtra },
+        { bitrateMode: 'variable' },
+        {},
+      ];
+    }
+
+    // Prefer 'realtime' latencyMode so Apple VideoToolbox / mobile hardware encoders
+    // avoid deep lookahead stalls, while explicitly requesting AVCC/HVCC format for mp4-muxer.
+    return [
+      { ...formatExtra, bitrateMode: 'variable', latencyMode: 'realtime' },
+      { ...formatExtra, bitrateMode: 'variable' },
+      { bitrateMode: 'variable', latencyMode: 'realtime' },
+      { bitrateMode: 'variable' },
+      { ...formatExtra },
+      {},
+    ];
+  };
 
   const probeCandidates = async (
     candidates: string[],
@@ -670,7 +728,8 @@ async function selectVideoEncoderProfile(
       return candidates[0] ? { codec: candidates[0], extras: {} } : null;
     }
     for (const candidate of candidates) {
-      for (const extras of extraVariants) {
+      const variants = buildExtrasForCodec(candidate);
+      for (const extras of variants) {
         try {
           const support = await VideoEncoder.isConfigSupported({
             codec: candidate,
@@ -679,7 +738,7 @@ async function selectVideoEncoderProfile(
             bitrate,
             framerate,
             hardwareAcceleration: accel,
-            ...extras,
+            ...(extras as any),
           });
           if (support.supported) {
             return { codec: candidate, extras };
@@ -690,83 +749,60 @@ async function selectVideoEncoderProfile(
     return null;
   };
 
-  if (options.codec) {
-    const res = await probeCandidates([options.codec], selectedAccel);
-    if (res) {
-      selectedCodec = res.codec;
-      encoderConfigExtras = res.extras;
-    } else if (selectedAccel === 'prefer-hardware') {
-      selectedAccel = 'no-preference';
-      isHardware = false;
-      const swRes = await probeCandidates([options.codec], selectedAccel);
-      if (swRes) {
-        selectedCodec = swRes.codec;
-        encoderConfigExtras = swRes.extras;
-      }
-    }
-  } else if (options.preferredCodec === 'av01') {
+  const tryAccelList = async (candidates: string[]) => {
     if (wantHw) {
-      const hwRes = await probeCandidates(av1Candidates, 'prefer-hardware');
+      const hwRes = await probeCandidates(candidates, 'prefer-hardware');
       if (hwRes) {
         selectedCodec = hwRes.codec;
         encoderConfigExtras = hwRes.extras;
         selectedAccel = 'prefer-hardware';
         isHardware = true;
+        return true;
       }
     }
-    if (!selectedCodec) {
-      const swRes = await probeCandidates(av1Candidates, 'no-preference');
-      if (swRes) {
-        selectedCodec = swRes.codec;
-        encoderConfigExtras = swRes.extras;
-        selectedAccel = 'no-preference';
-        isHardware = false;
-      }
-    }
-  } else if (options.preferredCodec === 'hevc') {
-    const res = await probeCandidates([...hevcCandidates, ...h264Candidates], selectedAccel);
-    if (res) {
-      selectedCodec = res.codec;
-      encoderConfigExtras = res.extras;
-    } else if (selectedAccel === 'prefer-hardware') {
+    const swRes = await probeCandidates(candidates, 'no-preference');
+    if (swRes) {
+      selectedCodec = swRes.codec;
+      encoderConfigExtras = swRes.extras;
       selectedAccel = 'no-preference';
       isHardware = false;
-      const swRes = await probeCandidates([...hevcCandidates, ...h264Candidates], selectedAccel);
-      if (swRes) {
-        selectedCodec = swRes.codec;
-        encoderConfigExtras = swRes.extras;
-      }
+      return true;
+    }
+    return false;
+  };
+
+  if (options.codec) {
+    await tryAccelList([options.codec]);
+  } else if (options.preferredCodec === 'av01') {
+    await tryAccelList(av1Candidates);
+  } else if (options.preferredCodec === 'hevc') {
+    // Always exhaust HEVC hardware AND default/software profiles before falling back to H.264
+    const gotHevc = await tryAccelList(hevcCandidates);
+    if (!gotHevc) {
+      options.onLog?.(
+        'Browser WebCodecs does not expose an HEVC (hvc1) encoder profile; falling back to H.264 (avc1).'
+      );
+      await tryAccelList(h264Candidates);
     }
   } else {
-    const res = await probeCandidates(h264Candidates, selectedAccel);
-    if (res) {
-      selectedCodec = res.codec;
-      encoderConfigExtras = res.extras;
-    } else if (selectedAccel === 'prefer-hardware') {
-      selectedAccel = 'no-preference';
-      isHardware = false;
-      const swRes = await probeCandidates(h264Candidates, selectedAccel);
-      if (swRes) {
-        selectedCodec = swRes.codec;
-        encoderConfigExtras = swRes.extras;
-      }
-    }
+    await tryAccelList(h264Candidates);
   }
 
   if (!selectedCodec) {
     throw new Error(
       options.preferredCodec === 'av01'
         ? 'This browser does not support WebCodecs AV1 (av01) encoding.'
-        : 'No supported hardware VideoEncoder profile found for target resolution/codec.'
+        : 'No supported WebCodecs VideoEncoder profile found for target resolution/codec.'
     );
   }
 
-  const isAv1 = selectedCodec.startsWith('av01');
-  const isHevc = selectedCodec.startsWith('hvc1') || selectedCodec.startsWith('hev1');
+  const finalCodec: string = selectedCodec;
+  const isAv1 = finalCodec.startsWith('av01');
+  const isHevc = finalCodec.startsWith('hvc1') || finalCodec.startsWith('hev1');
   const muxerVideoCodec: 'av1' | 'hevc' | 'avc' = isAv1 ? 'av1' : isHevc ? 'hevc' : 'avc';
 
   return {
-    selectedCodec,
+    selectedCodec: finalCodec,
     selectedAccel,
     isHardware,
     isAv1,
@@ -790,11 +826,20 @@ function buildDecoderCandidateConfigs(
     : ['no-preference'];
 
   if (track.fourcc === 'av01') {
-    // If av1C has configOBUs (> 4 bytes), try WITH description first;
-    // if av1C is 4-byte header only, OBUs are in-band so try WITHOUT description first.
-    const hasConfigObus = Boolean(track.description && track.description.byteLength > 4);
+    // Per W3C WebCodecs AV1 Registration, `description` is omitted for AV1 (Sequence Header OBU
+    // is carried in-band in keyframe 0, and we auto-inject av1C configOBUs if missing from sample 0).
+    // Always try in-band (no description) FIRST across prefer-hardware & no-preference (dav1d),
+    // and only try with `description: av1C` as a secondary fallback.
     for (const accel of accels) {
-      if (hasConfigObus && track.description) {
+      raw.push({
+        codec: track.codec,
+        codedWidth: track.codedWidth,
+        codedHeight: track.codedHeight,
+        hardwareAcceleration: accel,
+      });
+    }
+    if (track.description) {
+      for (const accel of accels) {
         raw.push({
           codec: track.codec,
           codedWidth: track.codedWidth,
@@ -802,31 +847,8 @@ function buildDecoderCandidateConfigs(
           description: track.description,
           hardwareAcceleration: accel,
         });
-        raw.push({
-          codec: track.codec,
-          codedWidth: track.codedWidth,
-          codedHeight: track.codedHeight,
-          hardwareAcceleration: accel,
-        });
-      } else {
-        raw.push({
-          codec: track.codec,
-          codedWidth: track.codedWidth,
-          codedHeight: track.codedHeight,
-          hardwareAcceleration: accel,
-        });
-        if (track.description) {
-          raw.push({
-            codec: track.codec,
-            codedWidth: track.codedWidth,
-            codedHeight: track.codedHeight,
-            description: track.description,
-            hardwareAcceleration: accel,
-          });
-        }
       }
     }
-    // Generic AV1 fallback strings in case av1C reported an exotic level/tier
     for (const fallbackCodec of ['av01.0.08M.08', 'av01.0.04M.08']) {
       if (fallbackCodec !== track.codec) {
         raw.push({
@@ -867,7 +889,6 @@ function buildDecoderCandidateConfigs(
     }
   }
 
-  // Deduplicate by codec + description presence + acceleration preference
   const seen = new Set<string>();
   const deduped: VideoDecoderConfig[] = [];
   for (const cfg of raw) {
@@ -917,19 +938,23 @@ async function runSequentialDecodeAttempt(
       frameRate: effectiveFps,
     },
     fastStart: false,
+    firstTimestampBehavior: 'offset',
   });
 
-  const reader = createSampleSliceReader(videoBlob, 2 * 1024 * 1024);
+  // 4 MB sequential read-ahead buffer minimizes Blob slice IPC on large MP4s
+  const reader = createSampleSliceReader(videoBlob, 4 * 1024 * 1024);
   let encoder: VideoEncoder | null = null;
   let decoder: VideoDecoder | null = null;
   let fatalError: Error | null = null;
   let encodedFramesCount = 0;
   let decodedFramesCount = 0;
   let encodedChunksOutputCount = 0;
+  let baseDecodedTsUs = -1;
   let lastEncodedTsUs = -1;
   let lastActivityAt = Date.now();
   let firstChunkFedAt = 0;
   let firstFrameEncodedAt = 0;
+  let autoCanvasFallback = Boolean(attemptOpts.forceCanvas);
 
   const shouldDecimateFps =
     !options.preserveSourceFramerate &&
@@ -940,6 +965,20 @@ async function runSequentialDecodeAttempt(
 
   let canvas: HTMLCanvasElement | null = null;
   let ctx: CanvasRenderingContext2D | null = null;
+
+  const ensureCanvas = () => {
+    if (canvas && ctx) return;
+    canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    ctx = canvas.getContext('2d', { alpha: false });
+    if (!ctx) {
+      throw new Error('Failed to initialize 2D scaling context.');
+    }
+    if (options.webgpuFilter === 'grayscale') {
+      ctx.filter = 'grayscale(100%)';
+    }
+  };
 
   const duration = track.durationSeconds > 0 ? track.durationSeconds : 1;
   const keyInterval = Math.max(1, Math.round(effectiveFps * 2));
@@ -967,11 +1006,15 @@ async function runSequentialDecodeAttempt(
   let lastMuxedDtsUs = -1;
   let muxWrapOffsetUs = 0;
 
+  // Generous queue depth keeps AV1 (dav1d/VideoToolbox) + B-frame H.264/HEVC pipelines 100% saturated
+  // without starving frame reordering or encoder lookahead.
+  const DECODE_QUEUE_MAX = 24;
+  const ENCODE_QUEUE_MAX = 16;
+
   try {
     encoder = new VideoEncoder({
       output: (chunk, meta) => {
         try {
-          encodedChunksOutputCount++;
           lastActivityAt = Date.now();
           const expectedDtsUs =
             submittedDtsUs.length > 0
@@ -1000,6 +1043,7 @@ async function runSequentialDecodeAttempt(
 
           lastMuxedDtsUs = safeDtsUs;
           muxer.addVideoChunk(chunk, meta, safePtsUs, ctoUs);
+          encodedChunksOutputCount++;
         } catch (outErr) {
           fatalError = outErr instanceof Error ? outErr : new Error(String(outErr));
         }
@@ -1016,7 +1060,7 @@ async function runSequentialDecodeAttempt(
       bitrate,
       framerate: effectiveFps,
       hardwareAcceleration: encoderProfile.selectedAccel,
-      ...encoderProfile.encoderConfigExtras,
+      ...(encoderProfile.encoderConfigExtras as any),
     });
 
     decoder = new VideoDecoder({
@@ -1036,17 +1080,23 @@ async function runSequentialDecodeAttempt(
           rawTs += decodedWrapOffsetUs;
           lastRawDecodedTsUs = rawTs;
 
-          if (shouldDecimateFps && encodedFramesCount > 0 && rawTs < nextAllowedTsUs) {
+          // Normalize first decoded frame to t = 0 so mp4-muxer & players always start cleanly at 0
+          if (baseDecodedTsUs < 0) {
+            baseDecodedTsUs = rawTs;
+          }
+          const relTs = Math.max(0, rawTs - baseDecodedTsUs);
+
+          if (shouldDecimateFps && encodedFramesCount > 0 && relTs < nextAllowedTsUs) {
             return;
           }
           if (shouldDecimateFps) {
-            nextAllowedTsUs = rawTs + targetStepUs;
+            nextAllowedTsUs = relTs + targetStepUs;
           }
 
           const tsUs =
-            encodedFramesCount > 0 && rawTs <= lastEncodedTsUs
+            encodedFramesCount > 0 && relTs <= lastEncodedTsUs
               ? lastEncodedTsUs + frameStepUs
-              : rawTs;
+              : relTs;
           const durUs =
             decodedFrame.duration && decodedFrame.duration > 0
               ? Math.round(decodedFrame.duration)
@@ -1060,10 +1110,8 @@ async function runSequentialDecodeAttempt(
             frameFmt.includes('10') ||
             frameFmt.includes('12');
 
-          // H.264 (avc1) hardware encoders widely reject 10-bit/12-bit AV1 pixel formats (I420P10/P010);
-          // also forceCanvas handles VideoDecoder IOSurface pixel-format mismatches with VideoEncoder on WebKit.
           const needsCanvas =
-            Boolean(attemptOpts.forceCanvas) ||
+            autoCanvasFallback ||
             decodedFrame.displayWidth !== width ||
             decodedFrame.displayHeight !== height ||
             options.webgpuFilter === 'grayscale' ||
@@ -1075,45 +1123,43 @@ async function runSequentialDecodeAttempt(
             firstFrameEncodedAt = Date.now();
           }
 
+          const encodeViaCanvas = () => {
+            ensureCanvas();
+            ctx!.drawImage(decodedFrame, 0, 0, width, height);
+            const scaledFrame = new VideoFrame(canvas!, {
+              timestamp: tsUs,
+              duration: durUs,
+            });
+            try {
+              submittedDtsUs.push(tsUs);
+              encoder!.encode(scaledFrame, { keyFrame });
+            } finally {
+              scaledFrame.close();
+            }
+          };
+
           if (!needsCanvas && tsUs === Math.round(decodedFrame.timestamp)) {
             submittedDtsUs.push(tsUs);
             encoder.encode(decodedFrame, { keyFrame });
           } else if (!needsCanvas) {
-            const retimed = new VideoFrame(decodedFrame, {
-              timestamp: tsUs,
-              duration: durUs,
-            });
             try {
-              submittedDtsUs.push(tsUs);
-              encoder.encode(retimed, { keyFrame });
-            } finally {
-              retimed.close();
+              const retimed = new VideoFrame(decodedFrame, {
+                timestamp: tsUs,
+                duration: durUs,
+              });
+              try {
+                submittedDtsUs.push(tsUs);
+                encoder.encode(retimed, { keyFrame });
+              } finally {
+                retimed.close();
+              }
+            } catch {
+              // Safari WebKit IOSurface VideoFrame cloning fallback
+              autoCanvasFallback = true;
+              encodeViaCanvas();
             }
           } else {
-            if (!canvas || !ctx) {
-              canvas = document.createElement('canvas');
-              canvas.width = width;
-              canvas.height = height;
-              ctx = canvas.getContext('2d', { alpha: false });
-              if (!ctx) {
-                fatalError = new Error('Failed to initialize 2D scaling context.');
-                return;
-              }
-              if (options.webgpuFilter === 'grayscale') {
-                ctx.filter = 'grayscale(100%)';
-              }
-            }
-            ctx.drawImage(decodedFrame, 0, 0, width, height);
-            const scaledFrame = new VideoFrame(canvas, {
-              timestamp: tsUs,
-              duration: durUs,
-            });
-            try {
-              submittedDtsUs.push(tsUs);
-              encoder.encode(scaledFrame, { keyFrame });
-            } finally {
-              scaledFrame.close();
-            }
+            encodeViaCanvas();
           }
 
           lastEncodedTsUs = tsUs;
@@ -1146,56 +1192,51 @@ async function runSequentialDecodeAttempt(
 
     decoder.configure(decoderConfig);
 
-    if (options.onProgress) {
-      options.onProgress({
-        percent: 0.1,
-        currentTime: 0,
-        duration,
-        fps: 0,
-      });
-    }
-
     lastActivityAt = Date.now();
+    let lastYieldAt = Date.now();
     let chunksFed = 0;
 
     const av1ConfigObus =
-      attemptOpts.prependAv1ConfigObus &&
-      track.fourcc === 'av01' &&
-      track.description &&
-      track.description.byteLength > 4
+      track.fourcc === 'av01' && track.description && track.description.byteLength > 4
         ? track.description.subarray(4)
         : null;
+    let shouldInjectAv1Obus = Boolean(attemptOpts.prependAv1ConfigObus);
 
+    // Unconditional stall watchdog — works regardless of queue backpressure state
     const checkWatchdog = () => {
       const now = Date.now();
       const idleMs = now - lastActivityAt;
-      if (
-        decodedFramesCount === 0 &&
-        chunksFed >= 16 &&
-        firstChunkFedAt > 0 &&
-        now - firstChunkFedAt > 2000
-      ) {
+      if (decodedFramesCount === 0 && chunksFed > 0 && firstChunkFedAt > 0 && now - firstChunkFedAt > 2500) {
         throw new Error(
-          `VideoDecoder (${decoderConfig.codec}, ${decoderConfig.hardwareAcceleration || 'default'}) stalled with 0 output frames.`
+          `VideoDecoder (${decoderConfig.codec}, ${decoderConfig.hardwareAcceleration || 'default'}) produced 0 frames after 2.5s.`
         );
       }
       if (
-        encodedFramesCount >= 16 &&
+        encodedFramesCount > 0 &&
         encodedChunksOutputCount === 0 &&
         firstFrameEncodedAt > 0 &&
-        now - firstFrameEncodedAt > 3500
+        now - firstFrameEncodedAt > 3000
       ) {
         throw new Error(
-          `VideoEncoder (${encoderProfile.selectedCodec}, ${encoderProfile.selectedAccel}) stalled with 0 output chunks.`
+          `VideoEncoder (${encoderProfile.selectedCodec}, ${encoderProfile.selectedAccel}) produced 0 chunks after 3.0s.`
         );
       }
-      if (idleMs > 12000 && chunksFed > 0) {
-        throw new Error('WebCodecs decode/encode pipeline stalled.');
+      if (idleMs > 15000 && chunksFed > 0) {
+        throw new Error('WebCodecs decode/encode pipeline stalled for >15s.');
       }
     };
 
-    // Stream samples sequentially with bounded queue backpressure + unconditional stall watchdog
-    for (let i = 0; i < track.samples.length; i++) {
+    const {
+      sampleCount,
+      sampleOffsets,
+      sampleSizes,
+      sampleTimestampsUs,
+      sampleDurationsUs,
+      sampleIsKey,
+    } = track;
+
+    // Stream samples sequentially with high-throughput backpressure + wall-clock UI yields
+    for (let i = 0; i < sampleCount; i++) {
       if (options.signal?.aborted) {
         throw new Error('Hardware compression cancelled by user.');
       }
@@ -1203,20 +1244,21 @@ async function runSequentialDecodeAttempt(
         throw fatalError;
       }
 
-      // Yield periodically to macrotask loop so WebKit VideoDecoder/VideoEncoder output callbacks flush cleanly
-      if (chunksFed > 0 && chunksFed % 60 === 0) {
+      const now = Date.now();
+      if (now - lastYieldAt >= 32) {
+        lastYieldAt = now;
         await sleepMs(0);
       }
 
       checkWatchdog();
 
       while (
-        (decoder.decodeQueueSize > 6 || encoder.encodeQueueSize > 4) &&
+        (decoder.decodeQueueSize > DECODE_QUEUE_MAX || encoder.encodeQueueSize > ENCODE_QUEUE_MAX) &&
         !fatalError &&
         !options.signal?.aborted
       ) {
         checkWatchdog();
-        await sleepMs(4);
+        await sleepMs(1);
       }
 
       if (options.signal?.aborted) {
@@ -1226,13 +1268,22 @@ async function runSequentialDecodeAttempt(
         throw fatalError;
       }
 
-      const sample = track.samples[i];
-      if (sample.size <= 0) continue;
+      const sz = sampleSizes[i];
+      if (sz <= 0) continue;
 
-      let bytes = await reader.read(sample.offset, sample.size);
+      let bytes = await reader.read(sampleOffsets[i], sz);
       if (bytes.byteLength === 0) continue;
 
-      if (chunksFed === 0 && av1ConfigObus && av1ConfigObus.byteLength > 0) {
+      const isKeySample = chunksFed === 0 || sampleIsKey[i] === 1;
+
+      // Auto-detect missing Sequence Header OBU on AV1 sample 0 when using in-band WebCodecs decoding
+      if (chunksFed === 0 && av1ConfigObus && !decoderConfig.description) {
+        if (!sampleHasAv1SequenceHeaderObu(bytes)) {
+          shouldInjectAv1Obus = true;
+        }
+      }
+
+      if (isKeySample && shouldInjectAv1Obus && av1ConfigObus && !sampleHasAv1SequenceHeaderObu(bytes)) {
         const combined = new Uint8Array(av1ConfigObus.byteLength + bytes.byteLength);
         combined.set(av1ConfigObus, 0);
         combined.set(bytes, av1ConfigObus.byteLength);
@@ -1240,9 +1291,9 @@ async function runSequentialDecodeAttempt(
       }
 
       const chunk = new EncodedVideoChunk({
-        type: chunksFed === 0 ? 'key' : sample.type,
-        timestamp: sample.timestampUs,
-        duration: sample.durationUs,
+        type: isKeySample ? 'key' : 'delta',
+        timestamp: sampleTimestampsUs[i],
+        duration: sampleDurationsUs[i],
         data: bytes,
       });
       decoder.decode(chunk);
@@ -1281,7 +1332,7 @@ async function runSequentialDecodeAttempt(
             return;
           }
           const idleMs = Date.now() - lastActivityAt;
-          if ((isZeroOutput() && idleMs > 2500) || idleMs > 12000) {
+          if ((isZeroOutput() && idleMs > 2500) || idleMs > 15000) {
             settled = true;
             clearInterval(timer);
             reject(new Error(`${label} flush timed out without output.`));
@@ -1380,7 +1431,7 @@ async function runSequentialDecodeAttempt(
  * Fast-path zero-seek sequential WebCodecs pipeline:
  * MP4 Demuxer -> EncodedVideoChunk -> VideoDecoder -> VideoFrame -> VideoEncoder -> MP4 Muxer.
  * Automatically retries hardware -> software (`no-preference` / dav1d) decoder, 2D canvas normalization,
- * AV1 configOBU prepending, and software encoder configs on 0-frame stalls or driver errors.
+ * AV1 configOBU injection, and fallback encoder configurations on 0-frame stalls or driver errors.
  */
 async function transcodeViaWebCodecsVideoDecoder(
   videoBlob: Blob,
@@ -1395,15 +1446,16 @@ async function transcodeViaWebCodecsVideoDecoder(
     return null;
   }
 
+  options.onStatus?.('Scanning MP4 sample table...');
   options.onLog?.('Scanning MP4 track sample table via zero-copy demuxer...');
   const track = await demuxMp4VideoTrack(videoBlob, options.onLog);
-  if (!track || track.samples.length === 0 || !track.codedWidth || !track.codedHeight) {
+  if (!track || track.sampleCount === 0 || !track.codedWidth || !track.codedHeight) {
     options.onLog?.('MP4 sample table unavailable for direct WebCodecs decode; falling back to media capture.');
     return null;
   }
 
   options.onLog?.(
-    `Demuxed ${track.samples.length.toLocaleString()} video frames (${track.codec}, ${track.codedWidth}x${track.codedHeight}, ${track.fps} fps, ${Math.round(track.durationSeconds)}s).`
+    `Demuxed ${track.sampleCount.toLocaleString()} video frames (${track.codec}, ${track.codedWidth}x${track.codedHeight}, ${track.fps} fps, ${Math.round(track.durationSeconds)}s).`
   );
 
   const wantHw = options.preferHardware !== false;
@@ -1440,7 +1492,7 @@ async function transcodeViaWebCodecsVideoDecoder(
     Math.max(180_000, options.bitrate || Math.round(width * height * effectiveFps * 0.06))
   );
 
-  // Throws explicitly if target encoder (e.g. av01) is unsupported in this browser
+  options.onStatus?.('Probing GPU encoder profile...');
   const primaryEncoderProfile = await selectVideoEncoderProfile(
     width,
     height,
@@ -1458,11 +1510,12 @@ async function transcodeViaWebCodecsVideoDecoder(
   let workingDecoderConfig: VideoDecoderConfig | null = null;
   let lastFailureReason: string | undefined;
 
-  // 1. Try top supported decoder configs (prefer-hardware first, then no-preference dav1d)
+  // 1. Try top supported decoder configs (in-band prefer-hardware -> in-band dav1d -> with extradata)
   for (const decCfg of supportedDecoderConfigs.slice(0, 4)) {
+    options.onStatus?.(`Hardware GPU · ${track.fourcc} → ${primaryEncoderProfile.muxerVideoCodec}`);
     options.onLog?.(
       `Attempting VideoDecoder: ${decCfg.codec} (${decCfg.hardwareAcceleration || 'default'}, ${
-        decCfg.description ? 'with av1C/extradata' : 'in-band'
+        decCfg.description ? 'with extradata' : 'in-band'
       })...`
     );
     const attempt = await runSequentialDecodeAttempt(
@@ -1484,12 +1537,13 @@ async function transcodeViaWebCodecsVideoDecoder(
       options.onLog?.(`WebCodecs attempt note: ${attempt.failureReason}`);
     }
 
-    // If decoder succeeded in outputting frames, but VideoEncoder rejected raw VideoFrame format
-    // or stalled, immediately retry THIS working decoder with 2D canvas pixel-format normalization!
+    // If decoder produced frames cleanly but encoder stalled/rejected raw VideoFrame format,
+    // immediately retry THIS working decoder with 2D canvas pixel-format normalization!
     if (attempt.decodedFramesCount > 0 && attempt.encodedChunksOutputCount === 0) {
       workingDecoderConfig = decCfg;
+      options.onStatus?.('Normalizing pixel format for GPU encoder...');
       options.onLog?.(
-        `Decoded ${attempt.decodedFramesCount} frames cleanly, retrying encoder with 2D canvas pixel normalization...`
+        `Decoded ${attempt.decodedFramesCount} frames cleanly; retrying encoder with 2D canvas pixel normalization...`
       );
       const canvasAttempt = await runSequentialDecodeAttempt(
         videoBlob,
@@ -1514,98 +1568,42 @@ async function transcodeViaWebCodecsVideoDecoder(
     }
   }
 
-  // 2. If all attempts produced 0 decoded frames on AV1 with configOBUs in av1C,
-  // prepend configOBUs (Sequence Header OBU) directly onto sample 0!
-  if (
-    !workingDecoderConfig &&
-    track.fourcc === 'av01' &&
-    track.description &&
-    track.description.byteLength > 4
-  ) {
-    const baseCfg = supportedDecoderConfigs[0];
-    const inBandCfg: VideoDecoderConfig = {
-      codec: baseCfg.codec,
-      codedWidth: baseCfg.codedWidth,
-      codedHeight: baseCfg.codedHeight,
-      hardwareAcceleration: 'no-preference',
-    };
-    options.onLog?.(
-      'Retrying AV1 VideoDecoder with av1C Sequence Header OBUs prepended to keyframe 0...'
-    );
-    const obuAttempt = await runSequentialDecodeAttempt(
-      videoBlob,
-      track,
-      inBandCfg,
-      primaryEncoderProfile,
-      width,
-      height,
-      bitrate,
-      effectiveFps,
-      options,
-      { prependAv1ConfigObus: true }
-    );
-    if (obuAttempt.result) {
-      return obuAttempt.result;
-    }
-    if (obuAttempt.decodedFramesCount > 0 && obuAttempt.encodedChunksOutputCount === 0) {
-      workingDecoderConfig = inBandCfg;
-      const obuCanvasAttempt = await runSequentialDecodeAttempt(
+  // 2. If decoder worked (or we have a fallback decoder), retry encoder with default latency + no-preference
+  if (workingDecoderConfig || primaryEncoderProfile.selectedAccel === 'prefer-hardware') {
+    try {
+      const altEncoderProfile = await selectVideoEncoderProfile(
+        width,
+        height,
+        bitrate,
+        effectiveFps,
+        { ...options, preferHardware: false },
+        { preferDefaultLatency: true }
+      );
+      const bestDecCfg =
+        workingDecoderConfig ||
+        supportedDecoderConfigs.find((c) => c.hardwareAcceleration === 'no-preference') ||
+        supportedDecoderConfigs[0];
+      options.onStatus?.(`Retrying encoder (${altEncoderProfile.selectedCodec})...`);
+      options.onLog?.(
+        `Retrying with compatibility encoder ${altEncoderProfile.selectedCodec} (${altEncoderProfile.selectedAccel}, default latency, canvas-normalized)...`
+      );
+      const altAttempt = await runSequentialDecodeAttempt(
         videoBlob,
         track,
-        inBandCfg,
-        primaryEncoderProfile,
+        bestDecCfg,
+        altEncoderProfile,
         width,
         height,
         bitrate,
         effectiveFps,
         options,
-        { forceCanvas: true, prependAv1ConfigObus: true }
+        { forceCanvas: true }
       );
-      if (obuCanvasAttempt.result) {
-        return obuCanvasAttempt.result;
+      if (altAttempt.result) {
+        return altAttempt.result;
       }
-    }
-  }
-
-  // 3. If HW encoder stalled/failed, retry software/default encoder ('no-preference') with canvas normalization
-  if (primaryEncoderProfile.selectedAccel === 'prefer-hardware') {
-    try {
-      const swEncoderProfile = await selectVideoEncoderProfile(
-        width,
-        height,
-        bitrate,
-        effectiveFps,
-        { ...options, preferHardware: false }
-      );
-      if (
-        swEncoderProfile.selectedAccel !== primaryEncoderProfile.selectedAccel ||
-        swEncoderProfile.selectedCodec !== primaryEncoderProfile.selectedCodec
-      ) {
-        const bestDecCfg =
-          workingDecoderConfig ||
-          supportedDecoderConfigs.find((c) => c.hardwareAcceleration === 'no-preference') ||
-          supportedDecoderConfigs[0];
-        options.onLog?.(
-          `Retrying with fallback encoder ${swEncoderProfile.selectedCodec} (${swEncoderProfile.selectedAccel})...`
-        );
-        const swAttempt = await runSequentialDecodeAttempt(
-          videoBlob,
-          track,
-          bestDecCfg,
-          swEncoderProfile,
-          width,
-          height,
-          bitrate,
-          effectiveFps,
-          options,
-          { forceCanvas: Boolean(workingDecoderConfig) }
-        );
-        if (swAttempt.result) {
-          return swAttempt.result;
-        }
-        if (swAttempt.failureReason) {
-          lastFailureReason = swAttempt.failureReason;
-        }
+      if (altAttempt.failureReason) {
+        lastFailureReason = altAttempt.failureReason;
       }
     } catch {
       // Allow <video> element fallback below
@@ -1622,6 +1620,7 @@ async function transcodeViaVideoElementCapture(
   videoBlob: Blob,
   options: HardwareTranscodeOptions
 ): Promise<HardwareEncodeResult> {
+  options.onStatus?.('Switching to browser media decoder...');
   options.onLog?.('Initializing browser <video> element frame-capture fallback...');
 
   return new Promise((resolve, reject) => {
@@ -1630,22 +1629,44 @@ async function transcodeViaVideoElementCapture(
     video.preload = 'auto';
     video.muted = true;
     video.playsInline = true;
-    video.src = videoUrl;
+    video.setAttribute('playsinline', '');
+    video.setAttribute('webkit-playsinline', '');
+    // Keep mounted tiny offscreen so iOS/iPadOS Safari actually fires loadedmetadata & seeked
+    video.style.position = 'fixed';
+    video.style.left = '-9999px';
+    video.style.top = '-9999px';
+    video.style.width = '1px';
+    video.style.height = '1px';
+    video.style.opacity = '0.001';
+    video.style.pointerEvents = 'none';
+    if (typeof document !== 'undefined' && document.body) {
+      document.body.appendChild(video);
+    }
 
     let activeEncoder: VideoEncoder | null = null;
     let settled = false;
     let startedCapture = false;
+    let metadataTimer: ReturnType<typeof setTimeout> | null = null;
 
     const cleanup = () => {
+      if (metadataTimer) {
+        clearTimeout(metadataTimer);
+        metadataTimer = null;
+      }
       try {
         if (activeEncoder && activeEncoder.state !== 'closed') {
           activeEncoder.close();
         }
       } catch {}
       activeEncoder = null;
-      video.pause();
-      video.removeAttribute('src');
-      video.load();
+      try {
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+        if (video.parentNode) {
+          video.parentNode.removeChild(video);
+        }
+      } catch {}
       URL.revokeObjectURL(videoUrl);
     };
 
@@ -1655,6 +1676,17 @@ async function transcodeViaVideoElementCapture(
       cleanup();
       reject(err);
     };
+
+    // Hard 8-second guard so detached/unsupported <video> can NEVER hang forever at 1%
+    metadataTimer = setTimeout(() => {
+      if (!startedCapture && !settled) {
+        fail(
+          new Error(
+            'Browser media decoder timed out loading this video file (unsupported codec or file too large for <video> fallback).'
+          )
+        );
+      }
+    }, 8000);
 
     video.onerror = () => {
       fail(new Error('Failed to decode source video via browser media element.'));
@@ -1685,6 +1717,10 @@ async function transcodeViaVideoElementCapture(
     const beginCapture = async () => {
       if (startedCapture || settled) return;
       startedCapture = true;
+      if (metadataTimer) {
+        clearTimeout(metadataTimer);
+        metadataTimer = null;
+      }
 
       try {
         await waitForFirstFrameReady();
@@ -1713,7 +1749,6 @@ async function transcodeViaVideoElementCapture(
           options
         );
 
-        // Paged 4 MB StreamTarget keeps peak RAM low on Snapdragon/MediaTek phones
         const pagedWriter = new PagedBlobWriter();
         const muxer = new Muxer({
           target: new StreamTarget({
@@ -1730,9 +1765,12 @@ async function transcodeViaVideoElementCapture(
             frameRate: framerate,
           },
           fastStart: false,
+          firstTimestampBehavior: 'offset',
         });
 
         let encodedFramesCount = 0;
+        let encodedChunksOutputCount = 0;
+        let firstFrameEncodedAt = 0;
         let encoderFailed = false;
         const fallbackStepUs = Math.max(1000, Math.round(1_000_000 / framerate));
         const fallbackDtsQueue: number[] = [];
@@ -1766,6 +1804,7 @@ async function transcodeViaVideoElementCapture(
               const safePtsUs = Math.max(safeDtsUs, ptsUs);
               fallbackLastMuxedDtsUs = safeDtsUs;
               muxer.addVideoChunk(chunk, meta, safePtsUs, safePtsUs - safeDtsUs);
+              encodedChunksOutputCount++;
             } catch (outErr) {
               encoderFailed = true;
               fail(outErr instanceof Error ? outErr : new Error(String(outErr)));
@@ -1786,7 +1825,7 @@ async function transcodeViaVideoElementCapture(
           bitrate,
           framerate,
           hardwareAcceleration: encoderProfile.selectedAccel,
-          ...encoderProfile.encoderConfigExtras,
+          ...(encoderProfile.encoderConfigExtras as any),
         });
 
         let useCanvasFallback =
@@ -1820,18 +1859,13 @@ async function transcodeViaVideoElementCapture(
         const startTime = Date.now();
         let lastProgressAt = 0;
 
-        if (options.onProgress) {
-          options.onProgress({
-            percent: 0.1,
-            currentTime: 0,
-            duration,
-            fps: 0,
-          });
-        }
-
         const finalizeEncode = async () => {
           if (settled || encoderFailed) return;
           await encoder.flush();
+          if (encodedChunksOutputCount === 0) {
+            fail(new Error('WebCodecs VideoEncoder produced 0 output chunks in media fallback mode.'));
+            return;
+          }
           muxer.finalize();
 
           let finalBlob = pagedWriter.toBlob('video/mp4');
@@ -1870,10 +1904,35 @@ async function transcodeViaVideoElementCapture(
               return;
             }
 
-            if (encoder.encodeQueueSize > 6) {
+            // Detect encoder stall inside media fallback mode
+            if (
+              encodedFramesCount > 0 &&
+              encodedChunksOutputCount === 0 &&
+              firstFrameEncodedAt > 0 &&
+              Date.now() - firstFrameEncodedAt > 4000
+            ) {
+              fail(new Error(`VideoEncoder (${encoderProfile.selectedCodec}) stalled with 0 output chunks.`));
+              return;
+            }
+
+            // Guard multi-hour videos from silently crawling at <1.5 fps via seek fallback
+            if (duration > 600 && frameIndex === 12) {
+              const elapsedSec = (Date.now() - startTime) / 1000;
+              const measuredFps = elapsedSec > 0 ? frameIndex / elapsedSec : 0;
+              if (measuredFps < 1.5) {
+                fail(
+                  new Error(
+                    `Direct WebCodecs VideoDecoder was unavailable for this file and seek fallback is too slow (${measuredFps.toFixed(1)} fps) for a ${Math.round(duration / 60)}-minute video. Check Console logs for decoder details or try H.264.`
+                  )
+                );
+                return;
+              }
+            }
+
+            if (encoder.encodeQueueSize > 12) {
               setTimeout(() => {
                 void stepThrough();
-              }, 4);
+              }, 2);
               return;
             }
 
@@ -1883,7 +1942,6 @@ async function transcodeViaVideoElementCapture(
               return;
             }
 
-            // Frame 0 is already decoded at t≈0 once readyState >= 2; avoid stalling on a no-op seek to 0
             const needSeek = !(
               frameIndex === 0 &&
               video.readyState >= 2 &&
@@ -1893,7 +1951,7 @@ async function transcodeViaVideoElementCapture(
             if (needSeek) {
               let seekOk = false;
               const seekTarget = Math.min(targetTime, Math.max(0, duration - 0.001));
-              const seekTimeoutMs = duration > 300 && frameIndex <= 2 ? 4000 : 8000;
+              const seekTimeoutMs = duration > 300 && frameIndex <= 2 ? 3500 : 8000;
               for (let seekTry = 0; seekTry < 2 && !seekOk; seekTry++) {
                 seekOk = await new Promise<boolean>((r) => {
                   let done = false;
@@ -1947,7 +2005,6 @@ async function transcodeViaVideoElementCapture(
                   duration: durationMicros,
                 });
               } catch {
-                // Fallback to 8-bit canvas capture if direct VideoFrame(video) fails
                 useCanvasFallback = true;
                 ensureCanvas();
                 ctx!.drawImage(video, 0, 0, width, height);
@@ -1966,6 +2023,9 @@ async function transcodeViaVideoElementCapture(
             }
 
             const keyFrame = frameIndex % Math.max(1, Math.round(framerate * 2)) === 0;
+            if (firstFrameEncodedAt === 0) {
+              firstFrameEncodedAt = Date.now();
+            }
             try {
               fallbackDtsQueue.push(timestampMicros);
               encoder.encode(frame, { keyFrame });
@@ -1977,7 +2037,7 @@ async function transcodeViaVideoElementCapture(
             frameIndex++;
 
             const now = Date.now();
-            if (options.onProgress && now - lastProgressAt >= 150) {
+            if (options.onProgress && (encodedFramesCount === 1 || now - lastProgressAt >= 150)) {
               lastProgressAt = now;
               const elapsed = (now - startTime) / 1000;
               const currentFps = elapsed > 0 ? Math.round(encodedFramesCount / elapsed) : 0;
@@ -2010,6 +2070,8 @@ async function transcodeViaVideoElementCapture(
     video.onloadedmetadata = () => {
       void beginCapture();
     };
+    video.src = videoUrl;
+    video.load();
   });
 }
 

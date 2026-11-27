@@ -1,21 +1,10 @@
 /**
  * Zero-Copy ISO 14496-12 MP4 Video Track Demuxer for WebCodecs VideoDecoder
  *
- * Reads only the `moov` atom into memory (< 2 MB) and exposes exact byte offsets,
- * timestamps, durations, keyframe flags, and WebCodecs codec configuration strings
+ * Reads only the `moov` atom (or `moof` headers for fragmented MP4) into memory and exposes
+ * compact TypedArray sample tables (zero JS object GC pressure even for 8-hour / 800,000+ frame files)
  * for AV1 (`av01`), H.264 (`avc1`/`avc3`), HEVC (`hvc1`/`hev1`), and VP9 (`vp09`).
- *
- * Enables sequential GPU/WebCodecs decoding (`EncodedVideoChunk -> VideoDecoder -> VideoFrame -> VideoEncoder`)
- * at 10x-40x real-time speed without slow `<video>` frame seeking (especially critical for long-GOP AV1).
  */
-
-export interface DemuxedSample {
-  type: 'key' | 'delta';
-  timestampUs: number;
-  durationUs: number;
-  offset: number;
-  size: number;
-}
 
 export interface DemuxedVideoTrack {
   codec: string;
@@ -26,7 +15,12 @@ export interface DemuxedVideoTrack {
   durationSeconds: number;
   fps: number;
   description?: Uint8Array;
-  samples: DemuxedSample[];
+  sampleCount: number;
+  sampleOffsets: Float64Array;
+  sampleSizes: Uint32Array;
+  sampleTimestampsUs: Float64Array;
+  sampleDurationsUs: Uint32Array;
+  sampleIsKey: Uint8Array;
 }
 
 interface BoxRef {
@@ -63,6 +57,36 @@ function reverseBits32(v: number): number {
   return out >>> 0;
 }
 
+/**
+ * Checks whether an AV1 sample begins with (or contains in its first few OBUs)
+ * an OBU_SEQUENCE_HEADER (obu_type === 1). Used to detect ISO BMFF AV1 files
+ * that store the Sequence Header only inside `av1C` `configOBUs`.
+ */
+export function sampleHasAv1SequenceHeaderObu(bytes: Uint8Array): boolean {
+  let pos = 0;
+  for (let n = 0; n < 6 && pos < bytes.byteLength; n++) {
+    const header = bytes[pos++];
+    if ((header & 0x80) !== 0) return false; // obu_forbidden_bit must be 0
+    const obuType = (header >>> 3) & 0x0f;
+    const hasExt = (header & 0x04) !== 0;
+    const hasSize = (header & 0x02) !== 0;
+    if (obuType === 1) return true; // OBU_SEQUENCE_HEADER
+    if (hasExt) pos++;
+    if (!hasSize) return false;
+    let obuSize = 0;
+    let shift = 0;
+    for (let k = 0; k < 8 && pos < bytes.byteLength; k++) {
+      const b = bytes[pos++];
+      obuSize |= (b & 0x7f) << shift;
+      if ((b & 0x80) === 0) break;
+      shift += 7;
+    }
+    if (obuSize < 0) return false;
+    pos += obuSize;
+  }
+  return false;
+}
+
 async function readBlobRange(blob: Blob, start: number, end: number): Promise<Uint8Array> {
   const slice = blob.slice(start, end);
   if (typeof slice.arrayBuffer === 'function') {
@@ -77,11 +101,7 @@ async function readBlobRange(blob: Blob, start: number, end: number): Promise<Ui
   return new Uint8Array(ab);
 }
 
-function iterChildBoxes(
-  view: DataView,
-  start: number,
-  end: number
-): BoxRef[] {
+function iterChildBoxes(view: DataView, start: number, end: number): BoxRef[] {
   const boxes: BoxRef[] = [];
   let pos = start;
   while (pos + 8 <= end) {
@@ -127,17 +147,13 @@ function buildAvcCodecString(fourcc: string, avcC: Uint8Array): string {
 }
 
 function buildHevcCodecString(fourcc: string, hvcC: Uint8Array): string {
-  // HEVCDecoderConfigurationRecord (ISO/IEC 14496-15):
-  // byte 1: general_profile_space(2) | general_tier_flag(1) | general_profile_idc(5)
-  // bytes 2..5: general_profile_compatibility_flags (32-bit)
-  // bytes 6..11: general_constraint_indicator_flags (6 bytes)
-  // byte 12: general_level_idc
+  // HEVCDecoderConfigurationRecord (ISO/IEC 14496-15)
   if (hvcC.byteLength < 13) return `${fourcc}.1.6.L120.90`;
   const view = new DataView(hvcC.buffer, hvcC.byteOffset, hvcC.byteLength);
   const b1 = hvcC[1];
   const profileSpaceNum = (b1 >>> 6) & 0x03;
   const profileSpace = ['', 'A', 'B', 'C'][profileSpaceNum] || '';
-  const tierFlag = ((b1 >>> 5) & 0x01) ? 'H' : 'L';
+  const tierFlag = (b1 >>> 5) & 0x01 ? 'H' : 'L';
   const profileIdc = b1 & 0x1f;
   const compatFlags = reverseBits32(view.getUint32(2, false)).toString(16);
   const levelIdc = hvcC[12];
@@ -155,7 +171,6 @@ function buildHevcCodecString(fourcc: string, hvcC: Uint8Array): string {
 }
 
 function buildVp9CodecString(vpcC: Uint8Array): string {
-  // FullBox vpcC: 4 bytes version+flags, then profile(1), level(1), bitDepth(4 bits)
   if (vpcC.byteLength < 7) return 'vp09.00.10.08';
   const profile = vpcC[4];
   const level = vpcC[5];
@@ -169,24 +184,61 @@ interface TrexDefaults {
   defaultSampleFlags: number;
 }
 
+interface FragmentedTableResult {
+  sampleCount: number;
+  sampleOffsets: Float64Array;
+  sampleSizes: Uint32Array;
+  sampleTimestampsUs: Float64Array;
+  sampleDurationsUs: Uint32Array;
+  sampleIsKey: Uint8Array;
+  durationSeconds: number;
+}
+
 /**
  * Zero-copy fragmented MP4 (`moof`/`traf`/`trun`) sample table reader.
- * Uses a 64 KB read-ahead buffer for box headers & small `moof` atoms while jumping past `mdat` payloads.
+ * Uses a 64 KB read-ahead buffer for box headers & `moof` atoms while jumping past `mdat` payloads,
+ * storing samples into growable TypedArrays for minimal RAM and zero GC pauses.
  */
 async function parseFragmentedSamples(
   blob: Blob,
   videoTrackId: number,
   timescale: number,
   trex: TrexDefaults
-): Promise<{ samples: DemuxedSample[]; durationSeconds: number } | null> {
+): Promise<FragmentedTableResult | null> {
   const totalSize = blob.size;
-  const rawSamples: {
-    type: 'key' | 'delta';
-    pts: number;
-    dur: number;
-    offset: number;
-    size: number;
-  }[] = [];
+
+  let capacity = 4096;
+  let count = 0;
+  let offsets = new Float64Array(capacity);
+  let sizes = new Uint32Array(capacity);
+  let ptsTicks = new Float64Array(capacity);
+  let durTicks = new Uint32Array(capacity);
+  let isKeyArr = new Uint8Array(capacity);
+
+  const grow = () => {
+    const nextCap = capacity * 2;
+    const nOff = new Float64Array(nextCap);
+    nOff.set(offsets);
+    offsets = nOff;
+
+    const nSz = new Uint32Array(nextCap);
+    nSz.set(sizes);
+    sizes = nSz;
+
+    const nPts = new Float64Array(nextCap);
+    nPts.set(ptsTicks);
+    ptsTicks = nPts;
+
+    const nDur = new Uint32Array(nextCap);
+    nDur.set(durTicks);
+    durTicks = nDur;
+
+    const nKey = new Uint8Array(nextCap);
+    nKey.set(isKeyArr);
+    isKeyArr = nKey;
+
+    capacity = nextCap;
+  };
 
   let bufStart = 0;
   let bufEnd = 0;
@@ -213,6 +265,8 @@ async function parseFragmentedSamples(
   let lastRawTfdt = -1;
   let tfdtWrapOffset = 0;
   let minPts = Infinity;
+  let totalDurTicks = 0;
+  const fallbackTickDur = Math.max(1, Math.round(timescale / 30));
 
   while (offset + 8 <= totalSize && guard < 10_000_000) {
     guard++;
@@ -258,13 +312,13 @@ async function parseFragmentedSamples(
         if (trackId !== videoTrackId) continue;
 
         let tfhdPos = tfhdBody + 8;
-        let baseDataOffset = offset; // default-base-is-moof / moof start
+        let baseDataOffset = offset;
         if (tfhdFlags & 0x000001) {
           baseDataOffset = readUint64(view, tfhdPos);
           tfhdPos += 8;
         }
         if (tfhdFlags & 0x000002) {
-          tfhdPos += 4; // sample_description_index
+          tfhdPos += 4;
         }
         let defaultDuration = trex.defaultSampleDuration;
         if (tfhdFlags & 0x000008) {
@@ -282,7 +336,7 @@ async function parseFragmentedSamples(
           tfhdPos += 4;
         }
 
-        // tfdt (track fragment decode time) — unwrap 32-bit ver 0 rollover at 2^32 ticks
+        // tfdt — unwrap 32-bit ver 0 rollover at 2^32 ticks
         const tfdt = trafChildren.find((b) => b.type === 'tfdt');
         let decodeTime = runningDecodeTime;
         if (tfdt && tfdt.size >= tfdt.headerSize + 8) {
@@ -333,7 +387,7 @@ async function parseFragmentedSamples(
             const needed = (hasDur ? 4 : 0) + (hasSize ? 4 : 0) + (hasFlags ? 4 : 0) + (hasCto ? 4 : 0);
             if (pos + needed > trunEnd) break;
 
-            const dur = hasDur ? view.getUint32(pos, false) : defaultDuration;
+            const dur = (hasDur ? view.getUint32(pos, false) : defaultDuration) || fallbackTickDur;
             if (hasDur) pos += 4;
             const size = hasSize ? view.getUint32(pos, false) : defaultSize;
             if (hasSize) pos += 4;
@@ -346,15 +400,18 @@ async function parseFragmentedSamples(
             }
             let cto = 0;
             if (hasCto) {
-              cto = trunVer === 1 ? view.getInt32(pos, false) : view.getUint32(pos, false);
+              if (trunVer === 1) {
+                cto = view.getInt32(pos, false);
+              } else {
+                const rawCto = view.getUint32(pos, false);
+                cto = rawCto > 0x7fffffff ? rawCto - 0x100000000 : rawCto;
+              }
               pos += 4;
             }
 
             const pts = decodeTime + cto;
             if (pts < minPts) minPts = pts;
 
-            // ISO 14496-12: bit 16 (0x00010000) is sample_is_non_sync_sample
-            // bits 24..25 (0x03000000): sample_depends_on === 2 means does not depend on others (I-frame)
             const hasExplicitFlags =
               hasFlags ||
               (i === 0 && firstSampleFlags !== null) ||
@@ -362,19 +419,19 @@ async function parseFragmentedSamples(
               trex.defaultSampleFlags !== 0;
             const isNonSync = (flags & 0x00010000) !== 0;
             const dependsOn = (flags >>> 24) & 0x03;
-            const isKey =
-              rawSamples.length === 0 || (hasExplicitFlags && !isNonSync && dependsOn !== 1);
+            const isKey = count === 0 || (hasExplicitFlags && !isNonSync && dependsOn !== 1);
 
-            rawSamples.push({
-              type: isKey ? 'key' : 'delta',
-              pts,
-              dur: dur || Math.round(timescale / 30),
-              offset: currentDataOffset,
-              size,
-            });
+            if (count >= capacity) grow();
+            offsets[count] = currentDataOffset;
+            sizes[count] = size;
+            ptsTicks[count] = pts;
+            durTicks[count] = dur;
+            isKeyArr[count] = isKey ? 1 : 0;
+            count++;
 
             currentDataOffset += size;
-            decodeTime += dur || Math.round(timescale / 30);
+            decodeTime += dur;
+            totalDurTicks += dur;
           }
         }
         runningDecodeTime = decodeTime;
@@ -386,23 +443,31 @@ async function parseFragmentedSamples(
 
   buf = null;
 
-  if (rawSamples.length === 0) return null;
+  if (count === 0) return null;
 
   const basePts = Number.isFinite(minPts) ? minPts : 0;
-  const samples: DemuxedSample[] = rawSamples.map((s, idx) => ({
-    type: idx === 0 ? 'key' : s.type,
-    timestampUs: Math.max(0, Math.round(((s.pts - basePts) * 1_000_000) / timescale)),
-    durationUs: Math.max(1, Math.round((s.dur * 1_000_000) / timescale)),
-    offset: s.offset,
-    size: s.size,
-  }));
+  const sampleTimestampsUs = new Float64Array(count);
+  const sampleDurationsUs = new Uint32Array(count);
+  for (let i = 0; i < count; i++) {
+    sampleTimestampsUs[i] = Math.max(0, Math.round(((ptsTicks[i] - basePts) * 1_000_000) / timescale));
+    sampleDurationsUs[i] = Math.max(1, Math.round((durTicks[i] * 1_000_000) / timescale));
+  }
+  isKeyArr[0] = 1;
 
   const durationSeconds =
     runningDecodeTime > basePts
       ? (runningDecodeTime - basePts) / timescale
-      : rawSamples.reduce((acc, s) => acc + s.dur, 0) / timescale;
+      : totalDurTicks / timescale;
 
-  return { samples, durationSeconds: Math.max(0.05, durationSeconds) };
+  return {
+    sampleCount: count,
+    sampleOffsets: offsets.subarray(0, count),
+    sampleSizes: sizes.subarray(0, count),
+    sampleTimestampsUs,
+    sampleDurationsUs,
+    sampleIsKey: isKeyArr.subarray(0, count),
+    durationSeconds: Math.max(0.05, durationSeconds),
+  };
 }
 
 /**
@@ -552,7 +617,6 @@ export async function demuxMp4VideoTrack(
           ? moovBytes.slice(av1C.start + av1C.headerSize, av1C.start + av1C.size)
           : new Uint8Array(0);
         codec = buildAv1CodecString(payload);
-        // Preserve av1C record when present so hardwareEngine can try both with/without configOBUs
         description = payload.byteLength >= 4 ? payload : undefined;
       } else if (fourcc === 'avc1' || fourcc === 'avc3') {
         const avcC = configBoxes.find((b) => b.type === 'avcC');
@@ -574,7 +638,7 @@ export async function demuxMp4VideoTrack(
         codec = buildVp9CodecString(payload);
         description = undefined;
       } else {
-        continue; // Unsupported codec for direct VideoDecoder demuxing
+        continue;
       }
 
       // Parse stsz (sample sizes)
@@ -583,7 +647,7 @@ export async function demuxMp4VideoTrack(
       const fixedSampleSize = stsz ? view.getUint32(stszBody + 4, false) : 0;
       const sampleCount = stsz ? view.getUint32(stszBody + 8, false) : 0;
 
-      // Fragmented MP4 path (when moov stsz has 0 samples and mvex/moof fragments hold the samples)
+      // Fragmented MP4 path
       if (sampleCount === 0 && mvex) {
         const trex = trexByTrackId.get(videoTrackId) || {
           defaultSampleDuration: Math.round(timescale / 30),
@@ -591,10 +655,10 @@ export async function demuxMp4VideoTrack(
           defaultSampleFlags: 0,
         };
         const frag = await parseFragmentedSamples(blob, videoTrackId, timescale, trex);
-        if (!frag || frag.samples.length === 0) continue;
+        if (!frag || frag.sampleCount === 0) continue;
         const fps =
           frag.durationSeconds > 0
-            ? Math.max(1, Math.round((frag.samples.length / frag.durationSeconds) * 100) / 100)
+            ? Math.max(1, Math.round((frag.sampleCount / frag.durationSeconds) * 100) / 100)
             : 30;
         return {
           codec,
@@ -605,7 +669,12 @@ export async function demuxMp4VideoTrack(
           durationSeconds: frag.durationSeconds,
           fps,
           description,
-          samples: frag.samples,
+          sampleCount: frag.sampleCount,
+          sampleOffsets: frag.sampleOffsets,
+          sampleSizes: frag.sampleSizes,
+          sampleTimestampsUs: frag.sampleTimestampsUs,
+          sampleDurationsUs: frag.sampleDurationsUs,
+          sampleIsKey: frag.sampleIsKey,
         };
       }
 
@@ -624,18 +693,18 @@ export async function demuxMp4VideoTrack(
       // Parse stco or co64 (chunk offsets)
       const stco = stblChildren.find((b) => b.type === 'stco');
       const co64 = stblChildren.find((b) => b.type === 'co64');
-      let chunkOffsets: number[] = [];
+      let chunkOffsets: Float64Array;
       if (stco) {
         const body = stco.start + stco.headerSize;
         const count = view.getUint32(body + 4, false);
-        chunkOffsets = new Array(count);
+        chunkOffsets = new Float64Array(count);
         for (let i = 0; i < count; i++) {
           chunkOffsets[i] = view.getUint32(body + 8 + i * 4, false);
         }
       } else if (co64) {
         const body = co64.start + co64.headerSize;
         const count = view.getUint32(body + 4, false);
-        chunkOffsets = new Array(count);
+        chunkOffsets = new Float64Array(count);
         for (let i = 0; i < count; i++) {
           chunkOffsets[i] = readUint64(view, body + 8 + i * 8);
         }
@@ -648,14 +717,13 @@ export async function demuxMp4VideoTrack(
       if (!stsc) continue;
       const stscBody = stsc.start + stsc.headerSize;
       const stscCount = view.getUint32(stscBody + 4, false);
-      const stscRuns: { firstChunk: number; samplesPerChunk: number }[] = [];
+      const stscFirstChunk = new Uint32Array(stscCount);
+      const stscSpc = new Uint32Array(stscCount);
       for (let i = 0; i < stscCount; i++) {
-        stscRuns.push({
-          firstChunk: view.getUint32(stscBody + 8 + i * 12, false),
-          samplesPerChunk: view.getUint32(stscBody + 12 + i * 12, false),
-        });
+        stscFirstChunk[i] = view.getUint32(stscBody + 8 + i * 12, false);
+        stscSpc[i] = view.getUint32(stscBody + 12 + i * 12, false);
       }
-      if (stscRuns.length === 0) continue;
+      if (stscCount === 0) continue;
 
       // Compute sample byte offsets in O(C + R) linear time
       const sampleOffsets = new Float64Array(sampleCount);
@@ -663,10 +731,10 @@ export async function demuxMp4VideoTrack(
       let runIdx = 0;
       for (let c = 0; c < chunkOffsets.length && sIdx < sampleCount; c++) {
         const chunkNum1 = c + 1;
-        while (runIdx + 1 < stscRuns.length && stscRuns[runIdx + 1].firstChunk <= chunkNum1) {
+        while (runIdx + 1 < stscCount && stscFirstChunk[runIdx + 1] <= chunkNum1) {
           runIdx++;
         }
-        const spc = stscRuns[runIdx].samplesPerChunk;
+        const spc = stscSpc[runIdx];
         let curOff = chunkOffsets[c];
         for (let k = 0; k < spc && sIdx < sampleCount; k++) {
           sampleOffsets[sIdx] = curOff;
@@ -683,11 +751,12 @@ export async function demuxMp4VideoTrack(
       const sttsCount = view.getUint32(sttsBody + 4, false);
       const sampleDts = new Float64Array(sampleCount);
       const sampleDur = new Uint32Array(sampleCount);
+      const fallbackTickDur = Math.max(1, Math.round(timescale / 30));
       let dtsAcc = 0;
       let tIdx = 0;
       for (let i = 0; i < sttsCount && tIdx < sampleCount; i++) {
         const cnt = view.getUint32(sttsBody + 8 + i * 8, false);
-        const delta = view.getUint32(sttsBody + 12 + i * 8, false);
+        const delta = view.getUint32(sttsBody + 12 + i * 8, false) || fallbackTickDur;
         for (let k = 0; k < cnt && tIdx < sampleCount; k++) {
           sampleDts[tIdx] = dtsAcc;
           sampleDur[tIdx] = delta;
@@ -695,8 +764,14 @@ export async function demuxMp4VideoTrack(
           tIdx++;
         }
       }
+      while (tIdx < sampleCount) {
+        sampleDts[tIdx] = dtsAcc;
+        sampleDur[tIdx] = fallbackTickDur;
+        dtsAcc += fallbackTickDur;
+        tIdx++;
+      }
 
-      // Parse optional ctts (composition time offsets for B-frames)
+      // Parse optional ctts (composition time offsets for B-frames; handle signed v0 quirk too)
       const ctts = stblChildren.find((b) => b.type === 'ctts');
       const samplePts = new Float64Array(sampleCount);
       let minPts = Infinity;
@@ -707,10 +782,13 @@ export async function demuxMp4VideoTrack(
         let cIdx = 0;
         for (let i = 0; i < cttsCount && cIdx < sampleCount; i++) {
           const cnt = view.getUint32(cttsBody + 8 + i * 8, false);
-          const off =
-            cttsVer === 1
-              ? view.getInt32(cttsBody + 12 + i * 8, false)
-              : view.getUint32(cttsBody + 12 + i * 8, false);
+          let off: number;
+          if (cttsVer === 1) {
+            off = view.getInt32(cttsBody + 12 + i * 8, false);
+          } else {
+            const rawOff = view.getUint32(cttsBody + 12 + i * 8, false);
+            off = rawOff > 0x7fffffff ? rawOff - 0x100000000 : rawOff;
+          }
           for (let k = 0; k < cnt && cIdx < sampleCount; k++) {
             const pts = sampleDts[cIdx] + off;
             samplePts[cIdx] = pts;
@@ -724,42 +802,43 @@ export async function demuxMp4VideoTrack(
           cIdx++;
         }
       } else {
-        for (let i = 0; i < sampleCount; i++) {
-          samplePts[i] = sampleDts[i];
-        }
+        samplePts.set(sampleDts);
         minPts = 0;
       }
 
       // Parse optional stss (keyframe indices, 1-based)
       const stss = stblChildren.find((b) => b.type === 'stss');
-      let keySet: Set<number> | null = null;
+      const sampleIsKey = new Uint8Array(sampleCount);
       if (stss) {
         const stssBody = stss.start + stss.headerSize;
         const stssCount = view.getUint32(stssBody + 4, false);
-        keySet = new Set<number>();
         for (let i = 0; i < stssCount; i++) {
-          keySet.add(view.getUint32(stssBody + 8 + i * 4, false) - 1);
+          const idx0 = view.getUint32(stssBody + 8 + i * 4, false) - 1;
+          if (idx0 >= 0 && idx0 < sampleCount) {
+            sampleIsKey[idx0] = 1;
+          }
         }
+        sampleIsKey[0] = 1;
+      } else {
+        sampleIsKey.fill(1);
       }
 
-      // Assemble sample descriptors
-      const samples: DemuxedSample[] = new Array(sampleCount);
+      // Assemble compact TypedArray timestamps & durations
+      const basePts = Number.isFinite(minPts) ? minPts : 0;
+      const sampleTimestampsUs = new Float64Array(sampleCount);
+      const sampleDurationsUs = new Uint32Array(sampleCount);
       for (let i = 0; i < sampleCount; i++) {
-        const normPts = Math.max(0, samplePts[i] - (Number.isFinite(minPts) ? minPts : 0));
-        const tsUs = Math.round((normPts * 1_000_000) / timescale);
-        const durUs = Math.max(1, Math.round((sampleDur[i] * 1_000_000) / timescale));
-        samples[i] = {
-          type: keySet === null || keySet.has(i) || i === 0 ? 'key' : 'delta',
-          timestampUs: tsUs,
-          durationUs: durUs,
-          offset: sampleOffsets[i],
-          size: sampleSizes[i],
-        };
+        const normPts = Math.max(0, samplePts[i] - basePts);
+        sampleTimestampsUs[i] = Math.round((normPts * 1_000_000) / timescale);
+        sampleDurationsUs[i] = Math.max(1, Math.round((sampleDur[i] * 1_000_000) / timescale));
       }
 
       const durationSeconds =
         dtsAcc > 0 ? dtsAcc / timescale : mdhdDuration > 0 ? mdhdDuration / timescale : 1;
-      const fps = durationSeconds > 0 ? Math.max(1, Math.round((sampleCount / durationSeconds) * 100) / 100) : 30;
+      const fps =
+        durationSeconds > 0
+          ? Math.max(1, Math.round((sampleCount / durationSeconds) * 100) / 100)
+          : 30;
 
       return {
         codec,
@@ -770,7 +849,12 @@ export async function demuxMp4VideoTrack(
         durationSeconds,
         fps,
         description,
-        samples,
+        sampleCount,
+        sampleOffsets,
+        sampleSizes,
+        sampleTimestampsUs,
+        sampleDurationsUs,
+        sampleIsKey,
       };
     }
 
@@ -781,10 +865,10 @@ export async function demuxMp4VideoTrack(
 }
 
 /**
- * Buffered 2 MB sequential read-ahead reader for MP4 samples.
- * Cuts Blob slice IPC calls by ~100x during WebCodecs VideoDecoder streaming.
+ * Buffered 4 MB sequential read-ahead reader for MP4 samples.
+ * Cuts Blob slice IPC calls by ~200x during high-speed WebCodecs VideoDecoder streaming.
  */
-export function createSampleSliceReader(blob: Blob, windowBytes = 2 * 1024 * 1024) {
+export function createSampleSliceReader(blob: Blob, windowBytes = 4 * 1024 * 1024) {
   let bufStart = 0;
   let bufEnd = 0;
   let buf: Uint8Array | null = null;

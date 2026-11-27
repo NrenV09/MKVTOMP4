@@ -1167,10 +1167,11 @@ export default function App() {
             ? `Hardware GPU (${hardwareCaps.webgpu.description})`
             : 'Hardware GPU Media Engine';
 
+        let liveHwStatus = `Initializing ${gpuEngineLabel}...`;
         setTelemetry((prev) => ({
           ...prev,
-          percent: Math.max(prev.percent, 1),
-          accelerationMode: gpuEngineLabel,
+          percent: Math.max(prev.percent, 0.1),
+          accelerationMode: liveHwStatus,
         }));
         addLog('system', `Initializing WebCodecs pipeline (${gpuEngineLabel})...`);
 
@@ -1286,6 +1287,13 @@ export default function App() {
             webgpuFilter: config.webgpuFilter,
             signal: hwAbortController.current.signal,
             onLog: (msg) => addLog('system', msg),
+            onStatus: (status) => {
+              liveHwStatus = status;
+              setTelemetry((prev) => ({
+                ...prev,
+                accelerationMode: status,
+              }));
+            },
             onProgress: (p) => {
               const now = Date.now();
               const elapsed = now - startTimeRef.current;
@@ -1300,7 +1308,7 @@ export default function App() {
                 elapsedMs: elapsed,
                 etaSeconds:
                   remainingSec !== null ? Math.max(0, Math.round(remainingSec)) : null,
-                accelerationMode: gpuEngineLabel,
+                accelerationMode: liveHwStatus || gpuEngineLabel,
               });
             },
           });
@@ -1309,6 +1317,11 @@ export default function App() {
 
           if (needsFinalMux) {
             const muxCodecName = hwResult.isAv1 ? 'AV1 (av01)' : hwResult.isHevc ? 'HEVC' : 'H.264';
+            setTelemetry((prev) => ({
+              ...prev,
+              percent: Math.max(prev.percent, 95),
+              accelerationMode: `Muxing ${muxCodecName} video & audio tracks...`,
+            }));
             addLog(
               'system',
               `Muxing compressed ${muxCodecName} video with ${validAudioIndices.length} audio & ${validSubtitles.length} subtitle track(s) into .${config.container.toUpperCase()}...`
@@ -1513,10 +1526,11 @@ export default function App() {
             'system',
             `AV1 (av01) source detected for .${config.container.toUpperCase()} export. Decoding AV1 via WebCodecs bridge before FFmpeg encode...`
           );
+          let liveBridgeStatus = 'WebCodecs AV1 Decode Bridge';
           setTelemetry((prev) => ({
             ...prev,
-            percent: Math.max(prev.percent, 1),
-            accelerationMode: 'WebCodecs AV1 Decode Bridge + FFmpeg',
+            percent: Math.max(prev.percent, 0.1),
+            accelerationMode: liveBridgeStatus,
           }));
 
           let bridgeSourceBlob: Blob = rawFile;
@@ -1573,6 +1587,13 @@ export default function App() {
             fastStart: false,
             signal: hwAbortController.current.signal,
             onLog: (msg) => addLog('system', msg),
+            onStatus: (status) => {
+              liveBridgeStatus = status;
+              setTelemetry((prev) => ({
+                ...prev,
+                accelerationMode: status,
+              }));
+            },
             onProgress: (p) => {
               const elapsed = Date.now() - startTimeRef.current;
               setTelemetry((prev) => ({
@@ -1583,7 +1604,7 @@ export default function App() {
                 fps: p.fps,
                 speed: `${p.fps} fps (AV1 Decode)`,
                 elapsedMs: elapsed,
-                accelerationMode: 'WebCodecs AV1 Decode Bridge',
+                accelerationMode: liveBridgeStatus,
               }));
             },
           });
