@@ -268,13 +268,44 @@ export function estimateCompressedSizeBytes(
 
 /**
  * Paged 4 MB block writer for mp4-muxer StreamTarget.
- * Avoids allocating a single massive contiguous ArrayBuffer on mobile RAM while
- * supporting random-access header patches (e.g. mdat size fixup at finalize()).
+ * Seals completed pages (> 4 pages behind tail, except page 0 needed for mdat size patch)
+ * into immutable Blobs so multi-hour / multi-GB 8-hour exports use <= 20 MB of JS heap RAM.
  */
 class PagedBlobWriter {
   private readonly pageSize = 4 * 1024 * 1024;
-  private pages: Uint8Array[] = [];
+  private readonly keepTailPages = 4;
+  private pages: (Uint8Array | null)[] = [];
+  private sealedBlobs: (Blob | null)[] = [];
+  private maxPageIdx = 0;
   private totalSize = 0;
+
+  private ensurePage(pageIdx: number): { u8: Uint8Array | null; sealed: Blob | null } {
+    if (pageIdx > this.maxPageIdx) {
+      this.maxPageIdx = pageIdx;
+    }
+    while (this.pages.length <= pageIdx) {
+      this.pages.push(null);
+      this.sealedBlobs.push(null);
+    }
+
+    // Seal older middle pages into Blobs to keep RAM bounded on 8-hour videos
+    const sealCutoff = this.maxPageIdx - this.keepTailPages;
+    for (let i = 1; i < sealCutoff; i++) {
+      const p = this.pages[i];
+      if (p) {
+        this.sealedBlobs[i] = new Blob([p as Uint8Array<ArrayBuffer>]);
+        this.pages[i] = null;
+      }
+    }
+
+    if (this.sealedBlobs[pageIdx]) {
+      return { u8: null, sealed: this.sealedBlobs[pageIdx] };
+    }
+    if (!this.pages[pageIdx]) {
+      this.pages[pageIdx] = new Uint8Array(this.pageSize);
+    }
+    return { u8: this.pages[pageIdx], sealed: null };
+  }
 
   write(data: Uint8Array, position: number): void {
     let remaining = data.byteLength;
@@ -284,11 +315,22 @@ class PagedBlobWriter {
     while (remaining > 0) {
       const pageIdx = Math.floor(dstPos / this.pageSize);
       const pageOffset = dstPos % this.pageSize;
-      while (this.pages.length <= pageIdx) {
-        this.pages.push(new Uint8Array(this.pageSize));
-      }
       const chunkLen = Math.min(remaining, this.pageSize - pageOffset);
-      this.pages[pageIdx].set(data.subarray(srcOffset, srcOffset + chunkLen), pageOffset);
+      const slice = data.subarray(srcOffset, srcOffset + chunkLen);
+
+      const slot = this.ensurePage(pageIdx);
+      if (slot.u8) {
+        slot.u8.set(slice, pageOffset);
+      } else if (slot.sealed) {
+        // Rare random-access patch to a sealed page: splice synchronously with Blob.slice
+        const copy = new Uint8Array(slice);
+        this.sealedBlobs[pageIdx] = new Blob([
+          slot.sealed.slice(0, pageOffset),
+          copy,
+          slot.sealed.slice(pageOffset + chunkLen),
+        ]);
+      }
+
       srcOffset += chunkLen;
       dstPos += chunkLen;
       remaining -= chunkLen;
@@ -303,15 +345,24 @@ class PagedBlobWriter {
     if (this.totalSize === 0) return new Blob([], { type: mimeType });
     const parts: BlobPart[] = [];
     let left = this.totalSize;
-    for (let i = 0; i < this.pages.length && left > 0; i++) {
+    const count = Math.max(this.pages.length, this.sealedBlobs.length);
+    for (let i = 0; i < count && left > 0; i++) {
       const len = Math.min(left, this.pageSize);
+      const sealed = this.sealedBlobs[i];
       const page = this.pages[i];
-      parts.push(len === this.pageSize ? page : page.subarray(0, len));
+      if (sealed) {
+        parts.push(len === this.pageSize ? sealed : sealed.slice(0, len));
+      } else if (page) {
+        parts.push((len === this.pageSize ? page : page.subarray(0, len)) as Uint8Array<ArrayBuffer>);
+      } else {
+        parts.push(new Uint8Array(len));
+      }
       left -= len;
     }
     const blob = new Blob(parts, { type: mimeType });
     // Release references to page buffers as soon as Blob wraps them
     this.pages = [];
+    this.sealedBlobs = [];
     return blob;
   }
 }
@@ -846,11 +897,48 @@ async function runSequentialDecodeAttempt(
     encoder = null;
   };
 
+  const frameStepUs = Math.max(1000, Math.round(1_000_000 / effectiveFps));
+  const submittedDtsUs: number[] = [];
+  let lastRawDecodedTsUs = -1;
+  let decodedWrapOffsetUs = 0;
+  let lastMuxedDtsUs = -1;
+  let muxWrapOffsetUs = 0;
+
   try {
     encoder = new VideoEncoder({
       output: (chunk, meta) => {
-        lastActivityAt = Date.now();
-        muxer.addVideoChunk(chunk, meta);
+        try {
+          lastActivityAt = Date.now();
+          const expectedDtsUs =
+            submittedDtsUs.length > 0
+              ? submittedDtsUs.shift()!
+              : lastMuxedDtsUs >= 0
+              ? lastMuxedDtsUs + frameStepUs
+              : 0;
+
+          let rawPtsUs = Number.isFinite(chunk.timestamp) ? Math.round(chunk.timestamp) : expectedDtsUs;
+          if (lastMuxedDtsUs >= 0 && rawPtsUs + muxWrapOffsetUs < lastMuxedDtsUs - 2_000_000_000) {
+            muxWrapOffsetUs += 4_294_967_296;
+          }
+          let ptsUs = Math.max(0, rawPtsUs + muxWrapOffsetUs);
+
+          // If hardware encoder clamped/reset chunk.timestamp far away from expected DTS, trust expectedDtsUs
+          if (Math.abs(ptsUs - expectedDtsUs) > 5_000_000) {
+            ptsUs = expectedDtsUs;
+          }
+
+          const safeDtsUs =
+            lastMuxedDtsUs >= 0
+              ? Math.max(lastMuxedDtsUs + frameStepUs, expectedDtsUs)
+              : Math.max(0, expectedDtsUs);
+          const safePtsUs = Math.max(safeDtsUs, ptsUs);
+          const ctoUs = safePtsUs - safeDtsUs;
+
+          lastMuxedDtsUs = safeDtsUs;
+          muxer.addVideoChunk(chunk, meta, safePtsUs, ctoUs);
+        } catch (outErr) {
+          fatalError = outErr instanceof Error ? outErr : new Error(String(outErr));
+        }
       },
       error: (err) => {
         fatalError = err instanceof Error ? err : new Error(String(err));
@@ -878,7 +966,13 @@ async function runSequentialDecodeAttempt(
             return;
           }
 
-          const rawTs = Math.max(0, Math.round(decodedFrame.timestamp));
+          let rawTs = Math.max(0, Math.round(decodedFrame.timestamp));
+          if (lastRawDecodedTsUs >= 0 && rawTs + decodedWrapOffsetUs < lastRawDecodedTsUs - 2_000_000_000) {
+            decodedWrapOffsetUs += 4_294_967_296;
+          }
+          rawTs += decodedWrapOffsetUs;
+          lastRawDecodedTsUs = rawTs;
+
           if (shouldDecimateFps && encodedFramesCount > 0 && rawTs < nextAllowedTsUs) {
             return;
           }
@@ -888,12 +982,12 @@ async function runSequentialDecodeAttempt(
 
           const tsUs =
             encodedFramesCount > 0 && rawTs <= lastEncodedTsUs
-              ? lastEncodedTsUs + Math.max(1000, Math.round(1_000_000 / effectiveFps))
+              ? lastEncodedTsUs + frameStepUs
               : rawTs;
           const durUs =
             decodedFrame.duration && decodedFrame.duration > 0
               ? Math.round(decodedFrame.duration)
-              : Math.round(1_000_000 / effectiveFps);
+              : frameStepUs;
 
           const frameFmt = String((decodedFrame as any).format || '').toUpperCase();
           const isHighBitFrame =
@@ -913,7 +1007,8 @@ async function runSequentialDecodeAttempt(
 
           const keyFrame = encodedFramesCount % keyInterval === 0;
 
-          if (!needsCanvas && tsUs === rawTs) {
+          if (!needsCanvas && tsUs === Math.round(decodedFrame.timestamp)) {
+            submittedDtsUs.push(tsUs);
             encoder.encode(decodedFrame, { keyFrame });
           } else if (!needsCanvas) {
             const retimed = new VideoFrame(decodedFrame, {
@@ -921,6 +1016,7 @@ async function runSequentialDecodeAttempt(
               duration: durUs,
             });
             try {
+              submittedDtsUs.push(tsUs);
               encoder.encode(retimed, { keyFrame });
             } finally {
               retimed.close();
@@ -945,6 +1041,7 @@ async function runSequentialDecodeAttempt(
               duration: durUs,
             });
             try {
+              submittedDtsUs.push(tsUs);
               encoder.encode(scaledFrame, { keyFrame });
             } finally {
               scaledFrame.close();
@@ -1377,10 +1474,42 @@ async function transcodeViaVideoElementCapture(
 
         let encodedFramesCount = 0;
         let encoderFailed = false;
+        const fallbackStepUs = Math.max(1000, Math.round(1_000_000 / framerate));
+        const fallbackDtsQueue: number[] = [];
+        let fallbackLastMuxedDtsUs = -1;
+        let fallbackWrapOffsetUs = 0;
 
         const encoder = new VideoEncoder({
           output: (chunk, meta) => {
-            muxer.addVideoChunk(chunk, meta);
+            try {
+              const expectedDtsUs =
+                fallbackDtsQueue.length > 0
+                  ? fallbackDtsQueue.shift()!
+                  : fallbackLastMuxedDtsUs >= 0
+                  ? fallbackLastMuxedDtsUs + fallbackStepUs
+                  : 0;
+              let rawPtsUs = Number.isFinite(chunk.timestamp) ? Math.round(chunk.timestamp) : expectedDtsUs;
+              if (
+                fallbackLastMuxedDtsUs >= 0 &&
+                rawPtsUs + fallbackWrapOffsetUs < fallbackLastMuxedDtsUs - 2_000_000_000
+              ) {
+                fallbackWrapOffsetUs += 4_294_967_296;
+              }
+              let ptsUs = Math.max(0, rawPtsUs + fallbackWrapOffsetUs);
+              if (Math.abs(ptsUs - expectedDtsUs) > 5_000_000) {
+                ptsUs = expectedDtsUs;
+              }
+              const safeDtsUs =
+                fallbackLastMuxedDtsUs >= 0
+                  ? Math.max(fallbackLastMuxedDtsUs + fallbackStepUs, expectedDtsUs)
+                  : Math.max(0, expectedDtsUs);
+              const safePtsUs = Math.max(safeDtsUs, ptsUs);
+              fallbackLastMuxedDtsUs = safeDtsUs;
+              muxer.addVideoChunk(chunk, meta, safePtsUs, safePtsUs - safeDtsUs);
+            } catch (outErr) {
+              encoderFailed = true;
+              fail(outErr instanceof Error ? outErr : new Error(String(outErr)));
+            }
           },
           error: (err) => {
             console.error('WebCodecs VideoEncoder error:', err);
@@ -1503,33 +1632,41 @@ async function transcodeViaVideoElementCapture(
             );
 
             if (needSeek) {
-              const seekOk = await new Promise<boolean>((r) => {
-                let done = false;
-                const timer = setTimeout(() => {
-                  if (!done) {
-                    done = true;
-                    video.removeEventListener('seeked', onSeeked);
-                    r(false);
-                  }
-                }, 3000);
-                const onSeeked = () => {
-                  if (!done) {
-                    done = true;
-                    clearTimeout(timer);
-                    video.removeEventListener('seeked', onSeeked);
-                    r(true);
-                  }
-                };
-                video.addEventListener('seeked', onSeeked);
-                video.currentTime = Math.min(targetTime, Math.max(0, duration - 0.001));
-              });
+              let seekOk = false;
+              const seekTarget = Math.min(targetTime, Math.max(0, duration - 0.001));
+              for (let seekTry = 0; seekTry < 2 && !seekOk; seekTry++) {
+                seekOk = await new Promise<boolean>((r) => {
+                  let done = false;
+                  const timer = setTimeout(() => {
+                    if (!done) {
+                      done = true;
+                      video.removeEventListener('seeked', onSeeked);
+                      r(false);
+                    }
+                  }, 8000);
+                  const onSeeked = () => {
+                    if (!done) {
+                      done = true;
+                      clearTimeout(timer);
+                      video.removeEventListener('seeked', onSeeked);
+                      r(true);
+                    }
+                  };
+                  video.addEventListener('seeked', onSeeked);
+                  video.currentTime = seekTarget;
+                });
+              }
 
               if (!seekOk) {
-                if (encodedFramesCount > 0) {
+                if (encodedFramesCount > 0 && targetTime >= duration - 1.5) {
                   await finalizeEncode();
                   return;
                 }
-                fail(new Error('Hardware decoder could not seek source video container.'));
+                fail(
+                  new Error(
+                    `Hardware decoder seek stalled at ${Math.floor(targetTime)}s of ${Math.floor(duration)}s.`
+                  )
+                );
                 return;
               }
             }
@@ -1570,6 +1707,7 @@ async function transcodeViaVideoElementCapture(
 
             const keyFrame = frameIndex % Math.max(1, Math.round(framerate * 2)) === 0;
             try {
+              fallbackDtsQueue.push(timestampMicros);
               encoder.encode(frame, { keyFrame });
             } finally {
               frame.close();

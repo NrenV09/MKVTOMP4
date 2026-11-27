@@ -191,9 +191,11 @@ async function parseFragmentedSamples(
   let offset = 0;
   let guard = 0;
   let runningDecodeTime = 0;
+  let lastRawTfdt = -1;
+  let tfdtWrapOffset = 0;
   let minPts = Infinity;
 
-  while (offset + 8 <= totalSize && guard < 100000) {
+  while (offset + 8 <= totalSize && guard < 10_000_000) {
     guard++;
     const hdrLen = Math.min(16, totalSize - offset);
     const hdr = await readBlobRange(blob, offset, offset + hdrLen);
@@ -257,7 +259,7 @@ async function parseFragmentedSamples(
           tfhdPos += 4;
         }
 
-        // tfdt (track fragment decode time)
+        // tfdt (track fragment decode time) — unwrap 32-bit ver 0 rollover at 2^32 ticks
         const tfdt = trafChildren.find((b) => b.type === 'tfdt');
         let decodeTime = runningDecodeTime;
         if (tfdt && tfdt.size >= tfdt.headerSize + 8) {
@@ -266,7 +268,12 @@ async function parseFragmentedSamples(
           if (tfdtVer === 1 && tfdt.size >= tfdt.headerSize + 12) {
             decodeTime = readUint64(view, tfdtBody + 4);
           } else {
-            decodeTime = view.getUint32(tfdtBody + 4, false);
+            const rawTfdt32 = view.getUint32(tfdtBody + 4, false);
+            if (lastRawTfdt >= 0 && rawTfdt32 + tfdtWrapOffset < lastRawTfdt - 2_000_000_000) {
+              tfdtWrapOffset += 4_294_967_296;
+            }
+            decodeTime = rawTfdt32 + tfdtWrapOffset;
+            lastRawTfdt = decodeTime;
           }
         }
 
@@ -386,7 +393,7 @@ export async function demuxMp4VideoTrack(blob: Blob): Promise<DemuxedVideoTrack 
     let offset = 0;
     let moovBox: BoxRef | null = null;
     let guard = 0;
-    while (offset + 8 <= totalSize && guard < 256) {
+    while (offset + 8 <= totalSize && guard < 100_000) {
       guard++;
       const hdrLen = Math.min(16, totalSize - offset);
       const hdr = await readBlobRange(blob, offset, offset + hdrLen);
@@ -412,7 +419,7 @@ export async function demuxMp4VideoTrack(blob: Blob): Promise<DemuxedVideoTrack 
       offset += boxSize;
     }
 
-    if (!moovBox || moovBox.size > 64 * 1024 * 1024) return null;
+    if (!moovBox || moovBox.size > 256 * 1024 * 1024) return null;
 
     // 2. Read `moov` into memory and inspect tracks
     const moovBytes = await readBlobRange(blob, moovBox.start, moovBox.start + moovBox.size);
@@ -571,7 +578,7 @@ export async function demuxMp4VideoTrack(blob: Blob): Promise<DemuxedVideoTrack 
         };
       }
 
-      if (!stsz || sampleCount === 0 || sampleCount > 2_000_000) continue;
+      if (!stsz || sampleCount === 0 || sampleCount > 10_000_000) continue;
 
       const sampleSizes = new Uint32Array(sampleCount);
       if (fixedSampleSize > 0) {

@@ -911,8 +911,8 @@ export default function App() {
 
       // Pipeline selection:
       const devCaps = detectDeviceCapabilities();
-      // Paged 4 MB StreamTarget allows large mobile files to compress safely in hardware GPU mode
-      const hwMaxBytes = devCaps.isAndroid ? 600 * 1024 * 1024 : 1500 * 1024 * 1024;
+      // Paged 4 MB StreamTarget seals pages to Blobs so multi-GB 8-hour files stay <= 20 MB RAM
+      const hwMaxBytes = devCaps.isAndroid ? 1500 * 1024 * 1024 : 4096 * 1024 * 1024;
       const isVideoTarget = config.targetCategory === 'video' && config.container !== 'gif';
       const isCopy = isVideoTarget && config.videoCodec === 'copy';
       const isTargetAv1 = isVideoTarget && config.videoCodec === 'av01';
@@ -1415,7 +1415,6 @@ export default function App() {
                 'make_zero',
                 '-max_muxing_queue_size',
                 '4096',
-                '-shortest',
                 virtualOut
               );
               return args;
