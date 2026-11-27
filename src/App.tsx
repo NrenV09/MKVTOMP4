@@ -7,6 +7,8 @@ import {
   Loader2,
   Film,
   Archive,
+  Copy,
+  Check,
 } from 'lucide-react';
 
 import coreURL from '@ffmpeg/core?url';
@@ -109,6 +111,7 @@ export default function App() {
   const [isConverting, setIsConverting] = useState(false);
   const [conversionError, setConversionError] = useState<string | null>(null);
   const [conversionDiagnostic, setConversionDiagnostic] = useState<FFmpegDiagnostic | null>(null);
+  const [copiedDiag, setCopiedDiag] = useState(false);
 
   const [telemetry, setTelemetry] = useState<ProgressTelemetry>({
     percent: 0,
@@ -1491,11 +1494,11 @@ export default function App() {
           }
           addLog(
             'system',
-            `Hardware GPU encoder fallback (${hwErr?.message || 'hardware unavailable'}). Switching to CPU Wasm encoder.`
+            `WebCodecs GPU unavailable (${hwErr?.message || 'hardware unavailable'}). Switching automatically to FFmpeg CPU Wasm encoder...`
           );
           setTelemetry((prev) => ({
             ...prev,
-            accelerationMode: 'CPU Wasm Fallback',
+            accelerationMode: 'FFmpeg CPU Wasm (Auto-Fallback)',
           }));
           executedCommand = buildFFmpegArgs(
             virtualIn,
@@ -1933,11 +1936,43 @@ export default function App() {
         {conversionError && (
           <div className="p-4 rounded-xl bg-red-950/40 border border-red-800/80 text-red-200 text-xs font-mono flex items-start gap-3">
             <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
-            <div className="flex-1">
-              <div className="font-semibold text-red-400 text-sm">
-                {conversionDiagnostic ? conversionDiagnostic.title : 'Conversion Error'}
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="font-semibold text-red-400 text-sm">
+                  {conversionDiagnostic ? conversionDiagnostic.title : 'Conversion Error'}
+                </div>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const recentLogs = logs
+                      .slice(-40)
+                      .map((l) => `[${l.timestamp}] [${l.type.toUpperCase()}] ${l.text}`)
+                      .join('\n');
+                    const payload = `Error: ${conversionError}\nUA: ${navigator.userAgent}\n\n${recentLogs}`;
+                    try {
+                      await navigator.clipboard.writeText(payload);
+                      setCopiedDiag(true);
+                      window.setTimeout(() => setCopiedDiag(false), 2000);
+                    } catch {
+                      setTerminalOpen(true);
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-red-900/50 hover:bg-red-800/60 text-red-100 border border-red-700/60 text-[11px] font-semibold transition-colors cursor-pointer"
+                >
+                  {copiedDiag ? (
+                    <>
+                      <Check className="w-3 h-3 text-emerald-300" />
+                      <span>Copied Log</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3 h-3" />
+                      <span>Copy Diagnostic Log</span>
+                    </>
+                  )}
+                </button>
               </div>
-              <p className="mt-1 text-red-300/90">
+              <p className="mt-1 text-red-300/90 break-words">
                 {conversionDiagnostic ? conversionDiagnostic.explanation : conversionError}
               </p>
               <div className="mt-2 text-[11px] text-amber-300/90 bg-red-950/60 border border-red-800/50 rounded px-2.5 py-1.5">

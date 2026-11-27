@@ -921,6 +921,23 @@ export function diagnoseFFmpegFailure(
     };
   }
 
+  // 4.1. iPadOS WKWebView / Chrome on iPadOS WebCodecs Restriction
+  if (
+    combined.includes('wkwebview') ||
+    combined.includes('chrome on ipados') ||
+    combined.includes('live 1-frame verification')
+  ) {
+    return {
+      title: 'iPadOS Browser Restricted Hardware Video Codec',
+      explanation:
+        typeof exitCodeOrError === 'string' && exitCodeOrError.length < 260
+          ? exitCodeOrError
+          : 'Chrome on iPadOS runs inside Apple WKWebView, which restricted hardware WebCodecs decoding/encoding for this stream.',
+      suggestion:
+        'Try opening this app in Apple Safari on iPadOS (which has full VideoToolbox GPU access), or switch to H.264 / Remux (Stream Copy) and tap "Copy Diagnostic Log" if it persists.',
+    };
+  }
+
   // 4.2. AV1 (av01) WebCodecs / Decoder Requirement
   if (
     combined.includes('libaom-av1') ||

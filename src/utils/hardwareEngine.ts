@@ -371,8 +371,191 @@ class PagedBlobWriter {
   }
 }
 
+function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(fallback);
+      }
+    }, ms);
+    promise.then(
+      (value) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(value);
+        }
+      },
+      () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(fallback);
+        }
+      }
+    );
+  });
+}
+
+function detectWebKitEnvironment(): { isIOSWebKit: boolean; isIOSChrome: boolean } {
+  if (typeof navigator === 'undefined') {
+    return { isIOSWebKit: false, isIOSChrome: false };
+  }
+  const ua = navigator.userAgent || '';
+  const isIOSDevice =
+    /iPad|iPhone|iPod/i.test(ua) ||
+    (navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1);
+  const isIOSChrome = isIOSDevice && /CriOS/i.test(ua);
+  const isIOSWebKit = isIOSDevice || /CriOS|FxiOS|EdgiOS/i.test(ua);
+  return { isIOSWebKit, isIOSChrome };
+}
+
+class WebCodecsEncoderUnavailableError extends Error {
+  readonly code = 'ENCODER_UNAVAILABLE';
+  constructor(message: string) {
+    super(message);
+    this.name = 'WebCodecsEncoderUnavailableError';
+  }
+}
+
+function getDescriptionByteLength(desc: unknown): number {
+  if (!desc) return 0;
+  if (desc instanceof ArrayBuffer) return desc.byteLength;
+  if (ArrayBuffer.isView(desc)) return desc.byteLength;
+  return 0;
+}
+
 /**
- * Probe WebGPU and WebCodecs hardware acceleration support
+ * Live 1-Frame Encoder Smoke Test (~20-40 ms on working configs, 1.2s hard cap).
+ * Apple WebKit / WKWebView (Safari & Chrome on iPadOS) frequently returns
+ * `{ supported: true }` from `isConfigSupported` for profiles that then stall with
+ * 0 output chunks or omit `decoderConfig.description` required by `mp4-muxer`.
+ */
+async function verifyEncoderProducesChunk(
+  config: VideoEncoderConfig,
+  muxerVideoCodec: 'av1' | 'hevc' | 'avc',
+  timeoutMs = 1200
+): Promise<{ ok: boolean; hasDescription: boolean; reason?: string }> {
+  if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') {
+    return { ok: false, hasDescription: false, reason: 'WebCodecs API unavailable' };
+  }
+
+  let encoder: VideoEncoder | null = null;
+  let frame: VideoFrame | null = null;
+
+  try {
+    const testW = Math.max(2, Math.round((config.width || 640) / 2) * 2);
+    const testH = Math.max(2, Math.round((config.height || 360) / 2) * 2);
+    const canvas = document.createElement('canvas');
+    canvas.width = testW;
+    canvas.height = testH;
+    const ctx = canvas.getContext('2d', { alpha: false });
+    if (!ctx) {
+      return { ok: false, hasDescription: false, reason: '2D canvas unavailable for smoke test' };
+    }
+    ctx.fillStyle = '#10141c';
+    ctx.fillRect(0, 0, testW, testH);
+    frame = new VideoFrame(canvas, { timestamp: 0, duration: 33_333 });
+
+    let chunkCount = 0;
+    let totalBytes = 0;
+    let hasDescription = false;
+    let asyncError: string | null = null;
+
+    const testPromise = new Promise<{ ok: boolean; hasDescription: boolean; reason?: string }>(
+      (resolve) => {
+        let settled = false;
+        const done = (res: { ok: boolean; hasDescription: boolean; reason?: string }) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(res);
+        };
+
+        const timer = setTimeout(() => {
+          done({
+            ok: false,
+            hasDescription,
+            reason: `Encoder timed out after ${timeoutMs}ms with ${chunkCount} chunk(s)`,
+          });
+        }, timeoutMs);
+
+        try {
+          encoder = new VideoEncoder({
+            output: (chunk, meta) => {
+              chunkCount++;
+              totalBytes += chunk.byteLength;
+              if (getDescriptionByteLength(meta?.decoderConfig?.description) >= 4) {
+                hasDescription = true;
+              }
+            },
+            error: (err) => {
+              asyncError = err instanceof Error ? err.message : String(err);
+              done({ ok: false, hasDescription, reason: asyncError });
+            },
+          });
+
+          encoder.configure({
+            ...config,
+            width: testW,
+            height: testH,
+          });
+          encoder.encode(frame!, { keyFrame: true });
+          encoder
+            .flush()
+            .then(() => {
+              if (asyncError) {
+                done({ ok: false, hasDescription, reason: asyncError });
+                return;
+              }
+              if (chunkCount === 0 || totalBytes === 0) {
+                done({ ok: false, hasDescription: false, reason: 'Encoder emitted 0 bytes on smoke test' });
+                return;
+              }
+              if ((muxerVideoCodec === 'avc' || muxerVideoCodec === 'hevc') && !hasDescription) {
+                done({
+                  ok: false,
+                  hasDescription: false,
+                  reason: 'Encoder omitted AVCC/HVCC decoderConfig.description required by MP4 muxer',
+                });
+                return;
+              }
+              done({ ok: true, hasDescription });
+            })
+            .catch((flushErr) => {
+              done({
+                ok: false,
+                hasDescription,
+                reason: flushErr instanceof Error ? flushErr.message : String(flushErr),
+              });
+            });
+        } catch (syncErr) {
+          done({
+            ok: false,
+            hasDescription,
+            reason: syncErr instanceof Error ? syncErr.message : String(syncErr),
+          });
+        }
+      }
+    );
+
+    return await testPromise;
+  } finally {
+    try {
+      frame?.close();
+    } catch {}
+    try {
+      if (encoder && encoder.state !== 'closed') {
+        encoder.close();
+      }
+    } catch {}
+  }
+}
+
+/**
+ * Probe WebGPU and WebCodecs hardware acceleration support (parallel + bounded timeouts)
  */
 export async function detectHardwareCapabilities(): Promise<HardwareCapabilities> {
   if (cachedCapabilities) return cachedCapabilities;
@@ -463,98 +646,58 @@ export async function detectHardwareCapabilities(): Promise<HardwareCapabilities
   };
 
   if (webcodecs.available && typeof VideoEncoder.isConfigSupported === 'function') {
-    // Check H.264 hardware encoding across High/Main/Baseline profiles (Desktop, Apple, Snapdragon, MediaTek)
-    for (const h264Profile of ['avc1.640033', 'avc1.64002a', 'avc1.4d0029', 'avc1.42001f']) {
+    const probeOne = async (
+      codec: string,
+      accel: HardwareAcceleration,
+      bitrate = 2_500_000
+    ): Promise<boolean> => {
       try {
-        const h264Res = await VideoEncoder.isConfigSupported({
-          codec: h264Profile,
-          width: 1280,
-          height: 720,
-          bitrate: 2_500_000,
-          framerate: 30,
-          hardwareAcceleration: 'prefer-hardware',
-        });
-        if (h264Res.supported) {
-          webcodecs.hwH264 = true;
-          break;
-        }
-      } catch {}
-    }
+        const res = await withTimeout(
+          VideoEncoder.isConfigSupported({
+            codec,
+            width: 1280,
+            height: 720,
+            bitrate,
+            framerate: 30,
+            hardwareAcceleration: accel,
+          }),
+          1500,
+          { supported: false } as VideoEncoderSupport
+        );
+        return Boolean(res.supported);
+      } catch {
+        return false;
+      }
+    };
 
-    // Check HEVC (H.265) hardware encoding (Apple VideoToolbox, Snapdragon/MediaTek MediaCodec)
-    for (const hevcProfile of [
+    const h264Profiles = [
+      'avc1.42e02a',
+      'avc1.42001f',
+      'avc1.64002a',
+      'avc1.4d0029',
+      'avc1.640033',
+    ];
+    const hevcProfiles = [
       'hvc1.1.6.L120.B0',
       'hvc1.1.6.L120.90',
       'hvc1.1.6.L93.B0',
       'hev1.1.6.L120.B0',
-      'hev1.1.6.L120.90',
-    ]) {
-      try {
-        const hevcRes = await VideoEncoder.isConfigSupported({
-          codec: hevcProfile,
-          width: 1280,
-          height: 720,
-          bitrate: 2_500_000,
-          framerate: 30,
-          hardwareAcceleration: 'prefer-hardware',
-        });
-        if (hevcRes.supported) {
-          webcodecs.hwHEVC = true;
-          break;
-        }
-      } catch {}
-    }
-
-    // Check VP9
-    try {
-      const vp9Res = await VideoEncoder.isConfigSupported({
-        codec: 'vp09.00.10.08',
-        width: 1280,
-        height: 720,
-        bitrate: 2_500_000,
-        framerate: 30,
-        hardwareAcceleration: 'prefer-hardware',
-      });
-      if (vp9Res.supported) webcodecs.hwVP9 = true;
-    } catch {}
-
-    // Check AV1 (av01) hardware encoding first (Snapdragon 8 Gen 3+, Dimensity 9300+, M3+, RTX 40+, Arc)
+    ];
     const av1Profiles = ['av01.0.08M.08', 'av01.0.05M.08', 'av01.0.04M.08'];
-    for (const av1Profile of av1Profiles) {
-      try {
-        const av1Hw = await VideoEncoder.isConfigSupported({
-          codec: av1Profile,
-          width: 1280,
-          height: 720,
-          bitrate: 2_000_000,
-          framerate: 30,
-          hardwareAcceleration: 'prefer-hardware',
-        });
-        if (av1Hw.supported) {
-          webcodecs.hwAV1 = true;
-          break;
-        }
-      } catch {}
-    }
 
-    // Also check built-in browser WebCodecs AV1 (av01) software encoding (Chrome/Edge/Firefox)
-    for (const av1Profile of av1Profiles) {
-      try {
-        const av1Sw = await VideoEncoder.isConfigSupported({
-          codec: av1Profile,
-          width: 1280,
-          height: 720,
-          bitrate: 2_000_000,
-          framerate: 30,
-          hardwareAcceleration: 'no-preference',
-        });
-        if (av1Sw.supported) {
-          webcodecs.swAV1 = true;
-          break;
-        }
-      } catch {}
-    }
+    const [h264Results, hevcResults, vp9Ok, av1HwResults, av1SwResults] = await Promise.all([
+      Promise.all(h264Profiles.map((c) => probeOne(c, 'prefer-hardware'))),
+      Promise.all(hevcProfiles.map((c) => probeOne(c, 'prefer-hardware'))),
+      probeOne('vp09.00.10.08', 'prefer-hardware'),
+      Promise.all(av1Profiles.map((c) => probeOne(c, 'prefer-hardware', 2_000_000))),
+      Promise.all(av1Profiles.map((c) => probeOne(c, 'no-preference', 2_000_000))),
+    ]);
 
+    webcodecs.hwH264 = h264Results.some(Boolean);
+    webcodecs.hwHEVC = hevcResults.some(Boolean);
+    webcodecs.hwVP9 = vp9Ok;
+    webcodecs.hwAV1 = av1HwResults.some(Boolean);
+    webcodecs.swAV1 = av1SwResults.some(Boolean);
     webcodecs.av1Available = webcodecs.hwAV1 || webcodecs.swAV1;
   }
 
@@ -638,7 +781,7 @@ async function selectVideoEncoderProfile(
   bitrate: number,
   framerate: number,
   options: HardwareTranscodeOptions,
-  probeOpts: { preferDefaultLatency?: boolean } = {}
+  probeOpts: { preferDefaultLatency?: boolean; skipLiveVerify?: boolean } = {}
 ): Promise<{
   selectedCodec: string;
   selectedAccel: HardwareAcceleration;
@@ -648,6 +791,7 @@ async function selectVideoEncoderProfile(
   muxerVideoCodec: 'av1' | 'hevc' | 'avc';
   encoderConfigExtras: EncoderExtraOptions;
 }> {
+  const { isIOSWebKit, isIOSChrome } = detectWebKitEnvironment();
   const pixels = width * height;
   const isAbove1080p = pixels > 1920 * 1080;
   const isHighFrameOrRes = isAbove1080p || (pixels >= 1920 * 1080 && framerate > 32);
@@ -657,7 +801,7 @@ async function selectVideoEncoderProfile(
       ? ['av01.0.12M.08', 'av01.0.08M.08', 'av01.0.05M.08', 'av01.0.04M.08']
       : ['av01.0.08M.08', 'av01.0.05M.08', 'av01.0.04M.08'];
 
-  // Full HEVC Main profile matrix covering 480p -> 4K60 across Safari VideoToolbox, Chrome, and MediaCodec
+  // Full HEVC Main profile matrix covering 480p -> 4K60 across Apple VideoToolbox, Chrome, and MediaCodec
   const hevcCandidates = isHighFrameOrRes
     ? [
         'hvc1.1.6.L153.B0',
@@ -666,21 +810,21 @@ async function selectVideoEncoderProfile(
         'hvc1.1.6.L123.B0',
         'hvc1.1.6.L120.B0',
         'hvc1.1.6.L120.90',
-        'hev1.1.6.L150.B0',
-        'hev1.1.6.L120.B0',
-        'hev1.1.6.L120.90',
       ]
     : [
         'hvc1.1.6.L120.B0',
         'hvc1.1.6.L120.90',
         'hvc1.1.6.L93.B0',
         'hvc1.1.6.L150.B0',
-        'hev1.1.6.L120.B0',
-        'hev1.1.6.L120.90',
       ];
 
-  // Prefer Level 4.2 High / Main / Baseline for <=1080p for broad mobile MediaCodec & desktop compatibility
-  const h264Candidates = isAbove1080p
+  // On iOS/iPadOS WebKit (Safari & Chrome WKWebView), prioritize Constrained Baseline first
+  // to avoid WebKit's known H.264 Main/High profile B-frame reorder queue stall bugs.
+  const h264Candidates = isIOSWebKit
+    ? isAbove1080p
+      ? ['avc1.42e033', 'avc1.42e02a', 'avc1.640033', 'avc1.42001f']
+      : ['avc1.42e02a', 'avc1.42c01f', 'avc1.42001f', 'avc1.4d002a', 'avc1.64002a']
+    : isAbove1080p
     ? ['avc1.640033', 'avc1.64002a', 'avc1.4d0029', 'avc1.42001f']
     : ['avc1.64002a', 'avc1.4d002a', 'avc1.4d0029', 'avc1.42001f', 'avc1.640033'];
 
@@ -700,134 +844,201 @@ async function selectVideoEncoderProfile(
       : {};
 
     if (probeOpts.preferDefaultLatency) {
+      return isIOSWebKit && isH265
+        ? [{ bitrateMode: 'variable' }, {}, { ...formatExtra, bitrateMode: 'variable' }]
+        : [{ ...formatExtra, bitrateMode: 'variable' }, { ...formatExtra }, { bitrateMode: 'variable' }, {}];
+    }
+
+    // On iOS/iPadOS WebKit HEVC, test without the Chromium-specific `hevc: { format: 'hevc' }` key first
+    if (isIOSWebKit && isH265) {
       return [
-        { ...formatExtra, bitrateMode: 'variable' },
-        { ...formatExtra },
+        { bitrateMode: 'variable', latencyMode: 'realtime' },
         { bitrateMode: 'variable' },
         {},
+        { ...formatExtra, bitrateMode: 'variable', latencyMode: 'realtime' },
       ];
     }
 
-    // Prefer 'realtime' latencyMode so Apple VideoToolbox / mobile hardware encoders
-    // avoid deep lookahead stalls, while explicitly requesting AVCC/HVCC format for mp4-muxer.
     return [
       { ...formatExtra, bitrateMode: 'variable', latencyMode: 'realtime' },
       { ...formatExtra, bitrateMode: 'variable' },
       { bitrateMode: 'variable', latencyMode: 'realtime' },
       { bitrateMode: 'variable' },
-      { ...formatExtra },
       {},
     ];
   };
 
-  const withTimeout = <T,>(p: Promise<T>, ms: number, fallback: T): Promise<T> =>
-    new Promise<T>((resolve) => {
-      let settled = false;
-      const timer = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          resolve(fallback);
-        }
-      }, ms);
-      p.then(
-        (v) => {
-          if (!settled) {
-            settled = true;
-            clearTimeout(timer);
-            resolve(v);
-          }
-        },
-        () => {
-          if (!settled) {
-            settled = true;
-            clearTimeout(timer);
-            resolve(fallback);
-          }
-        }
-      );
-    });
+  interface VerifiedChoice {
+    codec: string;
+    extras: EncoderExtraOptions;
+    accel: HardwareAcceleration;
+    isHardware: boolean;
+  }
 
-  const probeCandidates = async (
+  /**
+   * Single-wave parallel capability discovery (hard 1.2s cap) followed by a real
+   * 1-frame live encoder smoke test (~25ms per tested candidate, hard 1.2s cap).
+   */
+  const probeAndVerifyFamily = async (
     candidates: string[],
-    accel: HardwareAcceleration
-  ): Promise<{ codec: string; extras: EncoderExtraOptions } | null> => {
-    if (typeof VideoEncoder.isConfigSupported !== 'function') {
-      return candidates[0] ? { codec: candidates[0], extras: {} } : null;
+    familyMuxerCodec: 'av1' | 'hevc' | 'avc'
+  ): Promise<VerifiedChoice | null> => {
+    const accels: HardwareAcceleration[] = wantHw
+      ? ['prefer-hardware', 'no-preference']
+      : ['no-preference'];
+
+    interface ProbeTask {
+      codec: string;
+      extras: EncoderExtraOptions;
+      accel: HardwareAcceleration;
+      priority: number;
     }
-    for (const candidate of candidates) {
-      const variants = buildExtrasForCodec(candidate);
+
+    const tasks: ProbeTask[] = [];
+    let prio = 0;
+    for (const accel of accels) {
+      for (const codec of candidates) {
+        for (const extras of buildExtrasForCodec(codec)) {
+          tasks.push({ codec, extras, accel, priority: prio++ });
+        }
+      }
+    }
+
+    let supportedTasks: ProbeTask[];
+    if (typeof VideoEncoder.isConfigSupported === 'function') {
       const results = await Promise.all(
-        variants.map(async (extras) => {
+        tasks.map(async (task) => {
           try {
             const support = await withTimeout(
               VideoEncoder.isConfigSupported({
-                codec: candidate,
+                codec: task.codec,
                 width,
                 height,
                 bitrate,
                 framerate,
-                hardwareAcceleration: accel,
-                ...(extras as any),
+                hardwareAcceleration: task.accel,
+                ...(task.extras as any),
               }),
-              2500,
+              1200,
               { supported: false } as VideoEncoderSupport
             );
-            return support.supported ? { codec: candidate, extras } : null;
+            return support.supported ? task : null;
           } catch {
             return null;
           }
         })
       );
-      const firstHit = results.find((r) => r !== null);
-      if (firstHit) return firstHit;
+      supportedTasks = results
+        .filter((r): r is ProbeTask => r !== null)
+        .sort((a, b) => a.priority - b.priority);
+    } else {
+      supportedTasks = tasks;
     }
+
+    if (supportedTasks.length === 0) {
+      return null;
+    }
+
+    // Deduplicate to top distinct (accel, codec, latency/format) candidates for fast live smoke testing
+    const smokeQueue: ProbeTask[] = [];
+    const seenKeys = new Set<string>();
+    for (const task of supportedTasks) {
+      const key = `${task.accel}|${task.codec}|${task.extras.latencyMode || 'd'}|${
+        task.extras.avc ? 'avc' : task.extras.hevc ? 'hevc' : 'raw'
+      }`;
+      if (!seenKeys.has(key)) {
+        seenKeys.add(key);
+        smokeQueue.push(task);
+      }
+      if (smokeQueue.length >= 6) break;
+    }
+
+    if (probeOpts.skipLiveVerify) {
+      const best = smokeQueue[0];
+      return {
+        codec: best.codec,
+        extras: best.extras,
+        accel: best.accel,
+        isHardware: best.accel === 'prefer-hardware',
+      };
+    }
+
+    // Run 1-frame live encoder smoke test to reject WebKit false-positive profiles immediately
+    for (const task of smokeQueue) {
+      if (options.signal?.aborted) {
+        throw new Error('Hardware compression cancelled by user.');
+      }
+      options.onStatus?.(`Verifying ${task.codec.split('.')[0].toUpperCase()} encoder...`);
+      const smoke = await verifyEncoderProducesChunk(
+        {
+          codec: task.codec,
+          width,
+          height,
+          bitrate,
+          framerate,
+          hardwareAcceleration: task.accel,
+          ...(task.extras as any),
+        },
+        familyMuxerCodec,
+        1200
+      );
+      if (smoke.ok) {
+        return {
+          codec: task.codec,
+          extras: task.extras,
+          accel: task.accel,
+          isHardware: task.accel === 'prefer-hardware',
+        };
+      }
+      options.onLog?.(
+        `Skipped ${task.codec} (${task.accel}${task.extras.latencyMode ? ', ' + task.extras.latencyMode : ''}): ${
+          smoke.reason || 'failed 1-frame smoke test'
+        }.`
+      );
+    }
+
     return null;
   };
 
-  const tryAccelList = async (candidates: string[]) => {
-    if (wantHw) {
-      const hwRes = await probeCandidates(candidates, 'prefer-hardware');
-      if (hwRes) {
-        selectedCodec = hwRes.codec;
-        encoderConfigExtras = hwRes.extras;
-        selectedAccel = 'prefer-hardware';
-        isHardware = true;
-        return true;
-      }
-    }
-    const swRes = await probeCandidates(candidates, 'no-preference');
-    if (swRes) {
-      selectedCodec = swRes.codec;
-      encoderConfigExtras = swRes.extras;
-      selectedAccel = 'no-preference';
-      isHardware = false;
-      return true;
-    }
-    return false;
+  const applyChoice = (choice: VerifiedChoice | null): boolean => {
+    if (!choice) return false;
+    selectedCodec = choice.codec;
+    encoderConfigExtras = choice.extras;
+    selectedAccel = choice.accel;
+    isHardware = choice.isHardware;
+    return true;
   };
 
   if (options.codec) {
-    await tryAccelList([options.codec]);
+    const family: 'av1' | 'hevc' | 'avc' = options.codec.startsWith('av01')
+      ? 'av1'
+      : options.codec.startsWith('hvc1') || options.codec.startsWith('hev1')
+      ? 'hevc'
+      : 'avc';
+    applyChoice(await probeAndVerifyFamily([options.codec], family));
   } else if (options.preferredCodec === 'av01') {
-    await tryAccelList(av1Candidates);
+    applyChoice(await probeAndVerifyFamily(av1Candidates, 'av1'));
   } else if (options.preferredCodec === 'hevc') {
-    // Always exhaust HEVC hardware AND default/software profiles before falling back to H.264
-    const gotHevc = await tryAccelList(hevcCandidates);
+    const gotHevc = applyChoice(await probeAndVerifyFamily(hevcCandidates, 'hevc'));
     if (!gotHevc) {
       options.onLog?.(
-        'Browser WebCodecs does not expose an HEVC (hvc1) encoder profile; falling back to H.264 (avc1).'
+        `${
+          isIOSChrome ? 'Chrome on iPadOS (WKWebView)' : 'Browser WebCodecs'
+        } did not pass live HEVC (hvc1) encoder verification; switching to WebKit-safe H.264 (avc1)...`
       );
-      await tryAccelList(h264Candidates);
+      applyChoice(await probeAndVerifyFamily(h264Candidates, 'avc'));
     }
   } else {
-    await tryAccelList(h264Candidates);
+    applyChoice(await probeAndVerifyFamily(h264Candidates, 'avc'));
   }
 
   if (!selectedCodec) {
-    throw new Error(
+    throw new WebCodecsEncoderUnavailableError(
       options.preferredCodec === 'av01'
         ? 'This browser does not support WebCodecs AV1 (av01) encoding.'
-        : 'No supported WebCodecs VideoEncoder profile found for target resolution/codec.'
+        : isIOSChrome
+        ? 'Chrome on iPadOS (WKWebView) did not provide a working hardware VideoEncoder for this stream.'
+        : 'No working WebCodecs VideoEncoder profile passed live 1-frame verification.'
     );
   }
 
@@ -986,10 +1197,13 @@ async function runSequentialDecodeAttempt(
   let encodedChunksOutputCount = 0;
   let baseDecodedTsUs = -1;
   let lastEncodedTsUs = -1;
+  const { isIOSWebKit } = detectWebKitEnvironment();
   let lastActivityAt = Date.now();
   let firstChunkFedAt = 0;
   let firstFrameEncodedAt = 0;
-  let autoCanvasFallback = Boolean(attemptOpts.forceCanvas);
+  // On iOS/iPadOS WebKit (WKWebView/Safari), normalize AV1 decoded frames via 2D canvas immediately
+  // so Apple VideoToolbox VideoEncoder never stalls on mismatched IOSurface pixel formats.
+  let autoCanvasFallback = Boolean(attemptOpts.forceCanvas) || (isIOSWebKit && track.fourcc === 'av01');
 
   const shouldDecimateFps =
     !options.preserveSourceFramerate &&
@@ -1041,10 +1255,9 @@ async function runSequentialDecodeAttempt(
   let lastMuxedDtsUs = -1;
   let muxWrapOffsetUs = 0;
 
-  // Generous queue depth keeps AV1 (dav1d/VideoToolbox) + B-frame H.264/HEVC pipelines 100% saturated
-  // without starving frame reordering or encoder lookahead.
-  const DECODE_QUEUE_MAX = 24;
-  const ENCODE_QUEUE_MAX = 16;
+  // Keep queues deep enough for AV1/B-frame throughput while staying below WKWebView GPU Jetsam limits
+  const DECODE_QUEUE_MAX = isIOSWebKit ? 12 : 24;
+  const ENCODE_QUEUE_MAX = isIOSWebKit ? 8 : 16;
 
   try {
     encoder = new VideoEncoder({
@@ -1079,6 +1292,22 @@ async function runSequentialDecodeAttempt(
           lastMuxedDtsUs = safeDtsUs;
           muxer.addVideoChunk(chunk, meta, safePtsUs, ctoUs);
           encodedChunksOutputCount++;
+
+          // Drive progress truthfully from verified emitted & muxed output chunks
+          const now = Date.now();
+          if (options.onProgress && (encodedChunksOutputCount === 1 || now - lastProgressAt >= 150)) {
+            lastProgressAt = now;
+            const elapsed = (now - startTime) / 1000;
+            const currentFps = elapsed > 0 ? Math.round(encodedChunksOutputCount / elapsed) : 0;
+            const currentSec = Math.min(duration, safeDtsUs / 1_000_000);
+            const percent = Math.max(0.1, Math.min(99.5, (currentSec / duration) * 100));
+            options.onProgress({
+              percent,
+              currentTime: currentSec,
+              duration,
+              fps: currentFps,
+            });
+          }
         } catch (outErr) {
           fatalError = outErr instanceof Error ? outErr : new Error(String(outErr));
         }
@@ -1200,19 +1429,12 @@ async function runSequentialDecodeAttempt(
           lastEncodedTsUs = tsUs;
           encodedFramesCount++;
 
-          const now = Date.now();
-          if (options.onProgress && (encodedFramesCount === 1 || now - lastProgressAt >= 150)) {
-            lastProgressAt = now;
-            const elapsed = (now - startTime) / 1000;
-            const currentFps = elapsed > 0 ? Math.round(encodedFramesCount / elapsed) : 0;
-            const currentSec = Math.min(duration, tsUs / 1_000_000);
-            const percent = Math.max(0.1, Math.min(99.5, (currentSec / duration) * 100));
-            options.onProgress({
-              percent,
-              currentTime: currentSec,
-              duration,
-              fps: currentFps,
-            });
+          if (encodedFramesCount === 1 && encodedChunksOutputCount === 0) {
+            options.onStatus?.(
+              `Encoding ${track.fourcc} → ${encoderProfile.muxerVideoCodec.toUpperCase()} (${
+                encoderProfile.isHardware ? 'GPU' : 'WebCodecs'
+              })...`
+            );
           }
         } catch (frameErr) {
           fatalError = frameErr instanceof Error ? frameErr : new Error(String(frameErr));
@@ -1237,23 +1459,23 @@ async function runSequentialDecodeAttempt(
         : null;
     let shouldInjectAv1Obus = Boolean(attemptOpts.prependAv1ConfigObus);
 
-    // Unconditional stall watchdog — works regardless of queue backpressure state
+    // Unconditional tight stall watchdog — catches deadlocks fast regardless of queue backpressure
     const checkWatchdog = () => {
       const now = Date.now();
       const idleMs = now - lastActivityAt;
-      if (decodedFramesCount === 0 && chunksFed > 0 && firstChunkFedAt > 0 && now - firstChunkFedAt > 2500) {
+      if (decodedFramesCount === 0 && chunksFed > 0 && firstChunkFedAt > 0 && now - firstChunkFedAt > 2000) {
         throw new Error(
-          `VideoDecoder (${decoderConfig.codec}, ${decoderConfig.hardwareAcceleration || 'default'}) produced 0 frames after 2.5s.`
+          `VideoDecoder (${decoderConfig.codec}, ${decoderConfig.hardwareAcceleration || 'default'}) produced 0 frames after 2.0s.`
         );
       }
       if (
         encodedFramesCount > 0 &&
         encodedChunksOutputCount === 0 &&
         firstFrameEncodedAt > 0 &&
-        now - firstFrameEncodedAt > 3000
+        now - firstFrameEncodedAt > 2500
       ) {
         throw new Error(
-          `VideoEncoder (${encoderProfile.selectedCodec}, ${encoderProfile.selectedAccel}) produced 0 chunks after 3.0s.`
+          `VideoEncoder (${encoderProfile.selectedCodec}, ${encoderProfile.selectedAccel}) produced 0 chunks after 2.5s.`
         );
       }
       if (idleMs > 15000 && chunksFed > 0) {
@@ -1507,34 +1729,18 @@ async function transcodeViaWebCodecsVideoDecoder(
   const supportedDecoderConfigs: VideoDecoderConfig[] = [];
   if (typeof VideoDecoder.isConfigSupported === 'function') {
     const probeResults = await Promise.all(
-      rawCandidates.map(
-        (cfg) =>
-          new Promise<VideoDecoderConfig | null>((resolve) => {
-            let settled = false;
-            const timer = setTimeout(() => {
-              if (!settled) {
-                settled = true;
-                resolve(null);
-              }
-            }, 2500);
-            VideoDecoder.isConfigSupported(cfg).then(
-              (res) => {
-                if (!settled) {
-                  settled = true;
-                  clearTimeout(timer);
-                  resolve(res.supported ? cfg : null);
-                }
-              },
-              () => {
-                if (!settled) {
-                  settled = true;
-                  clearTimeout(timer);
-                  resolve(null);
-                }
-              }
-            );
-          })
-      )
+      rawCandidates.map(async (cfg) => {
+        try {
+          const res = await withTimeout(
+            VideoDecoder.isConfigSupported(cfg),
+            1200,
+            { supported: false } as VideoDecoderSupport
+          );
+          return res.supported ? cfg : null;
+        } catch {
+          return null;
+        }
+      })
     );
     for (const cfg of probeResults) {
       if (cfg) supportedDecoderConfigs.push(cfg);
@@ -1580,7 +1786,11 @@ async function transcodeViaWebCodecsVideoDecoder(
 
   // 1. Try top supported decoder configs (in-band prefer-hardware -> in-band dav1d -> with extradata)
   for (const decCfg of supportedDecoderConfigs.slice(0, 4)) {
-    options.onStatus?.(`Hardware GPU · ${track.fourcc} → ${primaryEncoderProfile.muxerVideoCodec}`);
+    options.onStatus?.(
+      `Decoding ${track.fourcc} → ${primaryEncoderProfile.muxerVideoCodec.toUpperCase()} (${
+        primaryEncoderProfile.isHardware ? 'GPU' : 'WebCodecs'
+      })...`
+    );
     options.onLog?.(
       `Attempting VideoDecoder: ${decCfg.codec} (${decCfg.hardwareAcceleration || 'default'}, ${
         decCfg.description ? 'with extradata' : 'in-band'
@@ -1636,8 +1846,8 @@ async function transcodeViaWebCodecsVideoDecoder(
     }
   }
 
-  // 2. If decoder worked (or we have a fallback decoder), retry encoder with default latency + no-preference
-  if (workingDecoderConfig || primaryEncoderProfile.selectedAccel === 'prefer-hardware') {
+  // 2. If decoder worked cleanly but primary encoder still produced 0 chunks, retry with compatibility encoder
+  if (workingDecoderConfig) {
     try {
       const altEncoderProfile = await selectVideoEncoderProfile(
         width,
@@ -2152,20 +2362,32 @@ export async function transcodeWithHardwareWebCodecs(
   videoBlob: Blob,
   options: HardwareTranscodeOptions
 ): Promise<HardwareEncodeResult> {
-  // 1. Try zero-seek sequential VideoDecoder pipeline first (10x-40x faster on AV1/HEVC/H.264 MP4/MOV)
+  const { isIOSWebKit, isIOSChrome } = detectWebKitEnvironment();
+
+  // 1. Try zero-seek sequential VideoDecoder pipeline first (with live 1-frame encoder smoke test)
   const sequentialResult = await transcodeViaWebCodecsVideoDecoder(videoBlob, options);
   if (sequentialResult) {
     return sequentialResult;
   }
 
-  // 2. Fallback: HTMLVideoElement frame-capture pipeline for non-ISO-BMFF or unusual containers
+  // 2. Jetsam safeguard on iOS/iPadOS WKWebView: never map >150 MB blob:// URLs into <video>
+  // (avoids 16-second timeouts and iPadOS tab reloads)
+  if (isIOSWebKit && videoBlob.size > 150 * 1024 * 1024) {
+    throw new Error(
+      `${
+        isIOSChrome ? 'Chrome on iPadOS (WKWebView)' : 'iPadOS Safari'
+      } could not decode this ${(videoBlob.size / 1048576).toFixed(0)} MB file via direct WebCodecs VideoDecoder (skipping <video> fallback to prevent iPad memory crash).`
+    );
+  }
+
+  // 3. Fallback: HTMLVideoElement frame-capture pipeline for small or non-ISO-BMFF files
   try {
     return await transcodeViaVideoElementCapture(videoBlob, options);
-  } catch (err) {
-    if (options.signal?.aborted) {
+  } catch (err: any) {
+    if (options.signal?.aborted || err instanceof WebCodecsEncoderUnavailableError) {
       throw err;
     }
-    if (options.preferHardware !== false) {
+    if (options.preferHardware !== false && !isIOSWebKit) {
       return await transcodeViaVideoElementCapture(videoBlob, {
         ...options,
         preferHardware: false,
