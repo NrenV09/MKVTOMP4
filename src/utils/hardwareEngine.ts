@@ -7,12 +7,14 @@
  */
 
 import { Muxer, StreamTarget } from 'mp4-muxer';
+import { create as createDav1d, type Dav1dInstance } from 'dav1d.js';
 import { EncodingConfig, ResolutionPreset, SourceMetadata } from '../types';
 import { relocateMoovToFrontZeroCopy } from './mp4FastStart';
 import {
   demuxMp4VideoTrack,
   createSampleSliceReader,
   sampleHasAv1SequenceHeaderObu,
+  type DemuxedVideoTrack,
 } from './mp4Demuxer';
 
 // Stub missing WebGPU types for TS compilation
@@ -59,7 +61,7 @@ export interface HardwareEncodeResult {
   width: number;
   height: number;
   bitrateBps: number;
-  decodeMode: 'webcodecs-sequential' | 'video-element';
+  decodeMode: 'webcodecs-sequential' | 'dav1d-wasm' | 'video-element';
 }
 
 let cachedCapabilities: HardwareCapabilities | null = null;
@@ -1063,7 +1065,7 @@ function sleepMs(ms: number): Promise<void> {
 }
 
 function buildDecoderCandidateConfigs(
-  track: NonNullable<Awaited<ReturnType<typeof demuxMp4VideoTrack>>>,
+  track: DemuxedVideoTrack,
   wantHw: boolean
 ): VideoDecoderConfig[] {
   const raw: VideoDecoderConfig[] = [];
@@ -1105,6 +1107,10 @@ function buildDecoderCandidateConfigs(
         });
       }
     }
+    // Minimal configs omitting codedWidth/codedHeight/hardwareAcceleration (WebKit WKWebView compatibility)
+    raw.push({ codec: track.codec });
+    raw.push({ codec: 'av01.0.08M.08' });
+    raw.push({ codec: 'av01.0.04M.08' });
   } else if (track.fourcc === 'vp09') {
     for (const accel of accels) {
       raw.push({
@@ -1114,6 +1120,7 @@ function buildDecoderCandidateConfigs(
         hardwareAcceleration: accel,
       });
     }
+    raw.push({ codec: track.codec });
   } else {
     for (const accel of accels) {
       if (track.description) {
@@ -1133,12 +1140,20 @@ function buildDecoderCandidateConfigs(
         });
       }
     }
+    // Minimal config fallback omitting codedWidth/codedHeight/hardwareAcceleration
+    raw.push(
+      track.description
+        ? { codec: track.codec, description: track.description }
+        : { codec: track.codec }
+    );
   }
 
   const seen = new Set<string>();
   const deduped: VideoDecoderConfig[] = [];
   for (const cfg of raw) {
-    const key = `${cfg.codec}|${cfg.description ? 'd' : 'n'}|${cfg.hardwareAcceleration}`;
+    const key = `${cfg.codec}|${cfg.description ? 'd' : 'n'}|${cfg.codedWidth ? 'wh' : 'min'}|${
+      cfg.hardwareAcceleration || 'omit'
+    }`;
     if (!seen.has(key)) {
       seen.add(key);
       deduped.push(cfg);
@@ -1463,9 +1478,9 @@ async function runSequentialDecodeAttempt(
     const checkWatchdog = () => {
       const now = Date.now();
       const idleMs = now - lastActivityAt;
-      if (decodedFramesCount === 0 && chunksFed > 0 && firstChunkFedAt > 0 && now - firstChunkFedAt > 2000) {
+      if (decodedFramesCount === 0 && chunksFed > 0 && firstChunkFedAt > 0 && now - firstChunkFedAt > 4500) {
         throw new Error(
-          `VideoDecoder (${decoderConfig.codec}, ${decoderConfig.hardwareAcceleration || 'default'}) produced 0 frames after 2.0s.`
+          `VideoDecoder (${decoderConfig.codec}, ${decoderConfig.hardwareAcceleration || 'default'}) produced 0 frames after 4.5s.`
         );
       }
       if (
@@ -1589,7 +1604,7 @@ async function runSequentialDecodeAttempt(
             return;
           }
           const idleMs = Date.now() - lastActivityAt;
-          if ((isZeroOutput() && idleMs > 2500) || idleMs > 15000) {
+          if ((isZeroOutput() && idleMs > 4500) || idleMs > 15000) {
             settled = true;
             clearInterval(timer);
             reject(new Error(`${label} flush timed out without output.`));
@@ -1684,6 +1699,12 @@ async function runSequentialDecodeAttempt(
   }
 }
 
+interface WebCodecsDecoderPhaseResult {
+  result: HardwareEncodeResult | null;
+  track: DemuxedVideoTrack | null;
+  reason?: string;
+}
+
 /**
  * Fast-path zero-seek sequential WebCodecs pipeline:
  * MP4 Demuxer -> EncodedVideoChunk -> VideoDecoder -> VideoFrame -> VideoEncoder -> MP4 Muxer.
@@ -1693,14 +1714,15 @@ async function runSequentialDecodeAttempt(
 async function transcodeViaWebCodecsVideoDecoder(
   videoBlob: Blob,
   options: HardwareTranscodeOptions
-): Promise<HardwareEncodeResult | null> {
+): Promise<WebCodecsDecoderPhaseResult> {
   if (
     typeof VideoDecoder === 'undefined' ||
     typeof EncodedVideoChunk === 'undefined' ||
     typeof VideoEncoder === 'undefined'
   ) {
-    options.onLog?.('WebCodecs VideoDecoder/VideoEncoder APIs unavailable in this browser.');
-    return null;
+    const reason = 'WebCodecs VideoDecoder/VideoEncoder APIs unavailable in this browser.';
+    options.onLog?.(reason);
+    return { result: null, track: null, reason };
   }
 
   options.onStatus?.('Scanning MP4 sample table...');
@@ -1714,8 +1736,9 @@ async function transcodeViaWebCodecsVideoDecoder(
     },
   });
   if (!track || track.sampleCount === 0 || !track.codedWidth || !track.codedHeight) {
-    options.onLog?.('MP4 sample table unavailable for direct WebCodecs decode; falling back to media capture.');
-    return null;
+    const reason = 'MP4 sample table unavailable for direct WebCodecs decode; falling back to media capture.';
+    options.onLog?.(reason);
+    return { result: null, track: track || null, reason };
   }
 
   options.onLog?.(
@@ -1749,11 +1772,18 @@ async function transcodeViaWebCodecsVideoDecoder(
     supportedDecoderConfigs.push(...rawCandidates);
   }
 
+  const { isIOSWebKit } = detectWebKitEnvironment();
   if (supportedDecoderConfigs.length === 0) {
-    options.onLog?.(
-      `Browser VideoDecoder reported no supported config for ${track.codec}; trying media element fallback.`
-    );
-    return null;
+    const reason = `Browser VideoDecoder reported no supported config for ${track.codec}.`;
+    options.onLog?.(`${reason} Trying fallback decoder path...`);
+    if (isIOSWebKit && track.fourcc !== 'av01') {
+      // Some iOS/iPadOS WKWebView builds reject isConfigSupported while allowing direct minimal configure()
+      supportedDecoderConfigs.push(
+        track.description ? { codec: track.codec, description: track.description } : { codec: track.codec }
+      );
+    } else {
+      return { result: null, track, reason };
+    }
   }
 
   const { width, height } = resolveEncodeDimensions(track.codedWidth, track.codedHeight, options);
@@ -1778,14 +1808,14 @@ async function transcodeViaWebCodecsVideoDecoder(
   options.onLog?.(
     `Encoder ready: ${primaryEncoderProfile.selectedCodec} (${primaryEncoderProfile.selectedAccel}, ${
       primaryEncoderProfile.encoderConfigExtras.latencyMode || 'default'
-    }). Testing ${Math.min(4, supportedDecoderConfigs.length)} decoder profile(s)...`
+    }). Testing ${Math.min(5, supportedDecoderConfigs.length)} decoder profile(s)...`
   );
 
   let workingDecoderConfig: VideoDecoderConfig | null = null;
   let lastFailureReason: string | undefined;
 
-  // 1. Try top supported decoder configs (in-band prefer-hardware -> in-band dav1d -> with extradata)
-  for (const decCfg of supportedDecoderConfigs.slice(0, 4)) {
+  // 1. Try top supported decoder configs (in-band prefer-hardware -> in-band dav1d -> minimal -> extradata)
+  for (const decCfg of supportedDecoderConfigs.slice(0, 5)) {
     options.onStatus?.(
       `Decoding ${track.fourcc} → ${primaryEncoderProfile.muxerVideoCodec.toUpperCase()} (${
         primaryEncoderProfile.isHardware ? 'GPU' : 'WebCodecs'
@@ -1808,7 +1838,7 @@ async function transcodeViaWebCodecsVideoDecoder(
       options
     );
     if (attempt.result) {
-      return attempt.result;
+      return { result: attempt.result, track };
     }
     if (attempt.failureReason) {
       lastFailureReason = attempt.failureReason;
@@ -1836,7 +1866,7 @@ async function transcodeViaWebCodecsVideoDecoder(
         { forceCanvas: true }
       );
       if (canvasAttempt.result) {
-        return canvasAttempt.result;
+        return { result: canvasAttempt.result, track };
       }
       if (canvasAttempt.failureReason) {
         lastFailureReason = canvasAttempt.failureReason;
@@ -1878,20 +1908,20 @@ async function transcodeViaWebCodecsVideoDecoder(
         { forceCanvas: true }
       );
       if (altAttempt.result) {
-        return altAttempt.result;
+        return { result: altAttempt.result, track };
       }
       if (altAttempt.failureReason) {
         lastFailureReason = altAttempt.failureReason;
       }
     } catch {
-      // Allow <video> element fallback below
+      // Allow fallback tiers below
     }
   }
 
   if (lastFailureReason) {
     options.onLog?.(`Direct WebCodecs decoder/encoder could not complete (${lastFailureReason}).`);
   }
-  return null;
+  return { result: null, track, reason: lastFailureReason };
 }
 
 async function transcodeViaVideoElementCapture(
@@ -1904,7 +1934,7 @@ async function transcodeViaVideoElementCapture(
   return new Promise((resolve, reject) => {
     const videoUrl = URL.createObjectURL(videoBlob);
     const video = document.createElement('video');
-    video.preload = 'auto';
+    video.preload = 'metadata';
     video.muted = true;
     video.playsInline = true;
     video.setAttribute('playsinline', '');
@@ -1955,16 +1985,16 @@ async function transcodeViaVideoElementCapture(
       reject(err);
     };
 
-    // Hard 8-second guard so detached/unsupported <video> can NEVER hang forever at 1%
+    // Hard 12-second guard so detached/unsupported <video> can NEVER hang forever at 1%
     metadataTimer = setTimeout(() => {
       if (!startedCapture && !settled) {
         fail(
           new Error(
-            'Browser media decoder timed out loading this video file (unsupported codec or file too large for <video> fallback).'
+            'Browser media decoder timed out loading this video file (unsupported codec or metadata stall).'
           )
         );
       }
-    }, 8000);
+    }, 12000);
 
     video.onerror = () => {
       fail(new Error('Failed to decode source video via browser media element.'));
@@ -1980,15 +2010,21 @@ async function transcodeViaVideoElementCapture(
           clearTimeout(timer);
           video.removeEventListener('loadeddata', onReady);
           video.removeEventListener('canplay', onReady);
+          video.removeEventListener('seeked', onReady);
           if (ok) res();
           else rej(new Error('Timed out waiting for browser decoder first video frame.'));
         };
         const onReady = () => finish(true);
         const timer = setTimeout(() => {
           finish(video.readyState >= 2);
-        }, 6000);
+        }, 8000);
         video.addEventListener('loadeddata', onReady);
         video.addEventListener('canplay', onReady);
+        video.addEventListener('seeked', onReady);
+        // Nudge AVFoundation under preload='metadata' to decode frame 0 cleanly
+        try {
+          video.currentTime = 0;
+        } catch {}
       });
     };
 
@@ -2353,10 +2389,516 @@ async function transcodeViaVideoElementCapture(
   });
 }
 
+let cachedDav1dWasmBytes: ArrayBuffer | null = null;
+
+async function getDav1dWasmBytes(): Promise<ArrayBuffer> {
+  if (cachedDav1dWasmBytes) return cachedDav1dWasmBytes;
+  const candidateUrls: string[] = [];
+  try {
+    const mod = await import('dav1d.js/dav1d.wasm?url');
+    if (mod?.default) candidateUrls.push(mod.default);
+  } catch {
+    // Ignore outside Vite bundler environments
+  }
+  candidateUrls.push('/dav1d/dav1d.wasm', './dav1d/dav1d.wasm');
+
+  for (const url of candidateUrls) {
+    try {
+      const res = await fetch(url, { credentials: 'same-origin' });
+      if (res.ok) {
+        const buf = await res.arrayBuffer();
+        if (buf.byteLength > 10_000) {
+          cachedDav1dWasmBytes = buf;
+          return buf;
+        }
+      }
+    } catch {
+      // Try next URL
+    }
+  }
+  throw new Error('Failed to load dav1d.wasm AV1 software decoder binary.');
+}
+
+/**
+ * Software BT.709-like YUV420p (I420) -> RGBA converter fallback if a browser rejects
+ * buffer-backed `new VideoFrame(i420Bytes, { format: 'I420' })`.
+ */
+function convertI420ToImageData(
+  yuv: Uint8Array,
+  srcW: number,
+  srcH: number,
+  outImageData: ImageData
+): void {
+  const ySize = srcW * srcH;
+  const uvW = (srcW + 1) >> 1;
+  const uvH = (srcH + 1) >> 1;
+  const uOffset = ySize;
+  const vOffset = ySize + uvW * uvH;
+  const dst = outImageData.data;
+
+  for (let y = 0; y < srcH; y++) {
+    const yRow = y * srcW;
+    const uvRow = (y >> 1) * uvW;
+    const dstRow = yRow * 4;
+    for (let x = 0; x < srcW; x++) {
+      const Y = yuv[yRow + x] - 16;
+      const uvIdx = uvRow + (x >> 1);
+      const U = yuv[uOffset + uvIdx] - 128;
+      const V = yuv[vOffset + uvIdx] - 128;
+
+      const c = 298 * Y;
+      let r = (c + 409 * V + 128) >> 8;
+      let g = (c - 100 * U - 208 * V + 128) >> 8;
+      let b = (c + 516 * U + 128) >> 8;
+
+      if (r < 0) r = 0; else if (r > 255) r = 255;
+      if (g < 0) g = 0; else if (g > 255) g = 255;
+      if (b < 0) b = 0; else if (b > 255) b = 255;
+
+      const d = dstRow + x * 4;
+      dst[d] = r;
+      dst[d + 1] = g;
+      dst[d + 2] = b;
+      dst[d + 3] = 255;
+    }
+  }
+}
+
+/**
+ * Tier-3 WebAssembly AV1 decoder (`dav1d.js`) -> WebCodecs VideoEncoder (`hvc1` / `avc1`) -> MP4 Muxer.
+ * Enables full AV1 -> HEVC/H.264 conversion on iPadOS Chrome (WKWebView) and Safari devices where
+ * WebCodecs VideoDecoder and AVFoundation cannot decode AV1 natively.
+ */
+async function transcodeViaDav1dWasm(
+  videoBlob: Blob,
+  track: DemuxedVideoTrack,
+  options: HardwareTranscodeOptions
+): Promise<HardwareEncodeResult> {
+  if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') {
+    throw new WebCodecsEncoderUnavailableError('WebCodecs VideoEncoder unavailable in this browser.');
+  }
+
+  options.onStatus?.('Loading WebAssembly AV1 decoder (dav1d)...');
+  options.onLog?.(
+    `Initializing pure-Wasm dav1d AV1 decoder (${track.sampleCount.toLocaleString()} samples, ${track.codedWidth}x${track.codedHeight})...`
+  );
+
+  const wasmData = await getDav1dWasmBytes();
+  let dav1d: Dav1dInstance | null = await createDav1d({ wasmData });
+
+  const { width, height } = resolveEncodeDimensions(track.codedWidth, track.codedHeight, options);
+  const effectiveFps =
+    options.preserveSourceFramerate || !options.framerate
+      ? Math.min(60, Math.max(15, Math.round(track.fps || 30)))
+      : Math.min(60, Math.max(15, options.framerate));
+  const bitrate = Math.min(
+    35_000_000,
+    Math.max(180_000, options.bitrate || Math.round(width * height * effectiveFps * 0.06))
+  );
+
+  options.onStatus?.('Probing GPU encoder profile...');
+  const encoderProfile = await selectVideoEncoderProfile(
+    width,
+    height,
+    bitrate,
+    effectiveFps,
+    options
+  );
+
+  const pagedWriter = new PagedBlobWriter();
+  const muxer = new Muxer({
+    target: new StreamTarget({
+      onData: (data, position) => {
+        pagedWriter.write(data, position);
+      },
+      chunked: true,
+      chunkSize: 4 * 1024 * 1024,
+    }),
+    video: {
+      codec: encoderProfile.muxerVideoCodec,
+      width,
+      height,
+      frameRate: effectiveFps,
+    },
+    fastStart: false,
+    firstTimestampBehavior: 'offset',
+  });
+
+  const reader = createSampleSliceReader(videoBlob, 4 * 1024 * 1024);
+  const { isIOSWebKit } = detectWebKitEnvironment();
+  const ENCODE_QUEUE_MAX = isIOSWebKit ? 8 : 16;
+
+  let encoder: VideoEncoder | null = null;
+  let fatalError: Error | null = null;
+  let encodedFramesCount = 0;
+  let encodedChunksOutputCount = 0;
+  let decodedFramesCount = 0;
+  let skippedInvisiblePackets = 0;
+  let firstFrameEncodedAt = 0;
+  let lastMuxedDtsUs = -1;
+  let muxWrapOffsetUs = 0;
+  let lastProgressAt = 0;
+
+  const duration = track.durationSeconds > 0 ? track.durationSeconds : 1;
+  const frameStepUs = Math.max(1000, Math.round(1_000_000 / effectiveFps));
+  const keyInterval = Math.max(1, Math.round(effectiveFps * 2));
+  const submittedDtsUs: number[] = [];
+  const startTime = Date.now();
+
+  const shouldDecimateFps =
+    !options.preserveSourceFramerate &&
+    Boolean(options.framerate && track.fps > 0 && options.framerate < track.fps * 0.96);
+  const targetStepUs =
+    shouldDecimateFps && options.framerate ? Math.round(1_000_000 / options.framerate) : 0;
+  let nextAllowedTsUs = 0;
+  let lastEncodedTsUs = -1;
+
+  let drawCanvas: HTMLCanvasElement | null = null;
+  let drawCtx: CanvasRenderingContext2D | null = null;
+  let srcCanvas: HTMLCanvasElement | null = null;
+  let srcCtx: CanvasRenderingContext2D | null = null;
+  let srcImageData: ImageData | null = null;
+  let forceRgbaCanvasBridge = false;
+
+  const ensureDrawCanvas = () => {
+    if (drawCanvas && drawCtx) return;
+    drawCanvas = document.createElement('canvas');
+    drawCanvas.width = width;
+    drawCanvas.height = height;
+    drawCtx = drawCanvas.getContext('2d', { alpha: false });
+    if (!drawCtx) {
+      throw new Error('Failed to initialize 2D scaling context for dav1d Wasm output.');
+    }
+    if (options.webgpuFilter === 'grayscale') {
+      drawCtx.filter = 'grayscale(100%)';
+    }
+  };
+
+  const cleanup = () => {
+    reader.release();
+    try {
+      if (encoder && encoder.state !== 'closed') encoder.close();
+    } catch {}
+    encoder = null;
+    try {
+      if (dav1d) {
+        dav1d.unsafeCleanup?.();
+        dav1d.FFI?.djs_free?.(dav1d.ref);
+      }
+    } catch {}
+    dav1d = null;
+  };
+
+  try {
+    encoder = new VideoEncoder({
+      output: (chunk, meta) => {
+        try {
+          const expectedDtsUs =
+            submittedDtsUs.length > 0
+              ? submittedDtsUs.shift()!
+              : lastMuxedDtsUs >= 0
+              ? lastMuxedDtsUs + frameStepUs
+              : 0;
+
+          let rawPtsUs = Number.isFinite(chunk.timestamp) ? Math.round(chunk.timestamp) : expectedDtsUs;
+          if (lastMuxedDtsUs >= 0 && rawPtsUs + muxWrapOffsetUs < lastMuxedDtsUs - 2_000_000_000) {
+            muxWrapOffsetUs += 4_294_967_296;
+          }
+          let ptsUs = Math.max(0, rawPtsUs + muxWrapOffsetUs);
+          if (Math.abs(ptsUs - expectedDtsUs) > 5_000_000) {
+            ptsUs = expectedDtsUs;
+          }
+
+          const safeDtsUs =
+            lastMuxedDtsUs >= 0
+              ? Math.max(lastMuxedDtsUs + frameStepUs, expectedDtsUs)
+              : Math.max(0, expectedDtsUs);
+          const safePtsUs = Math.max(safeDtsUs, ptsUs);
+          lastMuxedDtsUs = safeDtsUs;
+
+          muxer.addVideoChunk(chunk, meta, safePtsUs, safePtsUs - safeDtsUs);
+          encodedChunksOutputCount++;
+
+          const now = Date.now();
+          if (options.onProgress && (encodedChunksOutputCount === 1 || now - lastProgressAt >= 150)) {
+            lastProgressAt = now;
+            const elapsed = (now - startTime) / 1000;
+            const currentFps = elapsed > 0 ? Math.round(encodedChunksOutputCount / elapsed) : 0;
+            const currentSec = Math.min(duration, safeDtsUs / 1_000_000);
+            const percent = Math.max(0.1, Math.min(99.5, (currentSec / duration) * 100));
+            options.onProgress({
+              percent,
+              currentTime: currentSec,
+              duration,
+              fps: currentFps,
+            });
+          }
+        } catch (outErr) {
+          fatalError = outErr instanceof Error ? outErr : new Error(String(outErr));
+        }
+      },
+      error: (err) => {
+        fatalError = err instanceof Error ? err : new Error(String(err));
+      },
+    });
+
+    encoder.configure({
+      codec: encoderProfile.selectedCodec,
+      width,
+      height,
+      bitrate,
+      framerate: effectiveFps,
+      hardwareAcceleration: encoderProfile.selectedAccel,
+      ...(encoderProfile.encoderConfigExtras as any),
+    });
+
+    const av1ConfigObus =
+      track.description && track.description.byteLength > 4 ? track.description.subarray(4) : null;
+    const baseTsUs = track.sampleCount > 0 ? Math.max(0, Math.round(track.sampleTimestampsUs[0])) : 0;
+    let lastYieldAt = Date.now();
+    let packetsFed = 0;
+
+    options.onStatus?.(
+      `Decoding AV1 (Wasm dav1d) → ${encoderProfile.muxerVideoCodec.toUpperCase()} (${
+        encoderProfile.isHardware ? 'GPU' : 'WebCodecs'
+      })...`
+    );
+
+    for (let i = 0; i < track.sampleCount; i++) {
+      if (options.signal?.aborted) {
+        throw new Error('Hardware compression cancelled by user.');
+      }
+      if (fatalError) {
+        throw fatalError;
+      }
+
+      const now = Date.now();
+      if (now - lastYieldAt >= 24) {
+        lastYieldAt = now;
+        await sleepMs(0);
+      }
+
+      while (encoder.encodeQueueSize > ENCODE_QUEUE_MAX && !fatalError && !options.signal?.aborted) {
+        if (
+          encodedFramesCount > 0 &&
+          encodedChunksOutputCount === 0 &&
+          firstFrameEncodedAt > 0 &&
+          Date.now() - firstFrameEncodedAt > 4500
+        ) {
+          throw new Error(
+            `VideoEncoder (${encoderProfile.selectedCodec}) produced 0 chunks after 4.5s.`
+          );
+        }
+        await sleepMs(2);
+      }
+
+      if (options.signal?.aborted) {
+        throw new Error('Hardware compression cancelled by user.');
+      }
+      if (fatalError) {
+        throw fatalError;
+      }
+
+      const sz = track.sampleSizes[i];
+      if (sz <= 0) continue;
+
+      let bytes = await reader.read(track.sampleOffsets[i], sz);
+      if (bytes.byteLength === 0) continue;
+
+      const isKeySample = packetsFed === 0 || track.sampleIsKey[i] === 1;
+      if (isKeySample && av1ConfigObus && !sampleHasAv1SequenceHeaderObu(bytes)) {
+        const combined = new Uint8Array(av1ConfigObus.byteLength + bytes.byteLength);
+        combined.set(av1ConfigObus, 0);
+        combined.set(bytes, av1ConfigObus.byteLength);
+        bytes = combined;
+      }
+      packetsFed++;
+
+      let decoded: { width: number; height: number; data: Uint8Array } | null = null;
+      try {
+        decoded = dav1d.decodeFrameAsYUV(bytes);
+      } catch (decErr: any) {
+        skippedInvisiblePackets++;
+        if (decodedFramesCount === 0 && packetsFed >= 16) {
+          throw new Error(
+            `dav1d Wasm AV1 decoder failed on first ${packetsFed} samples (${
+              decErr?.message || 'unsupported AV1 bitstream'
+            }).`
+          );
+        }
+        continue;
+      }
+
+      if (!decoded || !decoded.width || !decoded.height || !decoded.data?.byteLength) {
+        continue;
+      }
+
+      decodedFramesCount++;
+      const relTs = Math.max(0, Math.round(track.sampleTimestampsUs[i]) - baseTsUs);
+      if (shouldDecimateFps && encodedFramesCount > 0 && relTs < nextAllowedTsUs) {
+        continue;
+      }
+      if (shouldDecimateFps) {
+        nextAllowedTsUs = relTs + targetStepUs;
+      }
+
+      const tsUs =
+        encodedFramesCount > 0 && relTs <= lastEncodedTsUs
+          ? lastEncodedTsUs + frameStepUs
+          : relTs;
+      const durUs = Math.max(1000, Math.round(track.sampleDurationsUs[i] || frameStepUs));
+
+      // Normalize 10-bit/16-bit packed YUV420 to 8-bit I420 if dav1d emitted 2 bytes per component
+      const expected8BitBytes = Math.floor((decoded.width * decoded.height * 3) / 2);
+      let yuv8 = decoded.data;
+      if (yuv8.byteLength >= expected8BitBytes * 2) {
+        const down = new Uint8Array(expected8BitBytes);
+        const u16 = new Uint16Array(yuv8.buffer, yuv8.byteOffset, expected8BitBytes);
+        for (let p = 0; p < expected8BitBytes; p++) {
+          down[p] = u16[p] >> 2;
+        }
+        yuv8 = down;
+      }
+
+      const keyFrame = encodedFramesCount % keyInterval === 0;
+      if (firstFrameEncodedAt === 0) {
+        firstFrameEncodedAt = Date.now();
+      }
+
+      const needsScaleOrFilter =
+        decoded.width !== width ||
+        decoded.height !== height ||
+        options.webgpuFilter === 'grayscale';
+
+      const encodeViaRgbaCanvas = () => {
+        if (!srcCanvas || !srcCtx || !srcImageData || srcCanvas.width !== decoded!.width || srcCanvas.height !== decoded!.height) {
+          srcCanvas = document.createElement('canvas');
+          srcCanvas.width = decoded!.width;
+          srcCanvas.height = decoded!.height;
+          srcCtx = srcCanvas.getContext('2d', { alpha: false });
+          if (!srcCtx) throw new Error('Failed to initialize 2D source canvas for dav1d output.');
+          srcImageData = srcCtx.createImageData(decoded!.width, decoded!.height);
+        }
+        convertI420ToImageData(yuv8, decoded!.width, decoded!.height, srcImageData);
+        srcCtx.putImageData(srcImageData, 0, 0);
+
+        let targetCanvas = srcCanvas;
+        if (needsScaleOrFilter) {
+          ensureDrawCanvas();
+          drawCtx!.drawImage(srcCanvas, 0, 0, width, height);
+          targetCanvas = drawCanvas!;
+        }
+        const canvasFrame = new VideoFrame(targetCanvas, {
+          timestamp: tsUs,
+          duration: durUs,
+        });
+        try {
+          submittedDtsUs.push(tsUs);
+          encoder!.encode(canvasFrame, { keyFrame });
+        } finally {
+          canvasFrame.close();
+        }
+      };
+
+      if (forceRgbaCanvasBridge) {
+        encodeViaRgbaCanvas();
+      } else {
+        let i420Frame: VideoFrame | null = null;
+        try {
+          i420Frame = new VideoFrame(yuv8, {
+            format: 'I420',
+            codedWidth: decoded.width,
+            codedHeight: decoded.height,
+            timestamp: tsUs,
+            duration: durUs,
+          });
+          if (needsScaleOrFilter) {
+            ensureDrawCanvas();
+            drawCtx!.drawImage(i420Frame, 0, 0, width, height);
+            const scaledFrame = new VideoFrame(drawCanvas!, {
+              timestamp: tsUs,
+              duration: durUs,
+            });
+            try {
+              submittedDtsUs.push(tsUs);
+              encoder.encode(scaledFrame, { keyFrame });
+            } finally {
+              scaledFrame.close();
+            }
+          } else {
+            submittedDtsUs.push(tsUs);
+            encoder.encode(i420Frame, { keyFrame });
+          }
+        } catch {
+          // Fallback to pure software I420 -> RGBA Canvas2D bridge if WebKit rejects buffer VideoFrame
+          forceRgbaCanvasBridge = true;
+          encodeViaRgbaCanvas();
+        } finally {
+          try {
+            i420Frame?.close();
+          } catch {}
+        }
+      }
+
+      lastEncodedTsUs = tsUs;
+      encodedFramesCount++;
+    }
+
+    if (options.signal?.aborted) {
+      throw new Error('Hardware compression cancelled by user.');
+    }
+    if (fatalError) {
+      throw fatalError;
+    }
+
+    await encoder.flush();
+    if (fatalError) {
+      throw fatalError;
+    }
+    if (encodedChunksOutputCount === 0 || encodedFramesCount === 0) {
+      throw new Error(
+        `dav1d Wasm decoded ${decodedFramesCount} frames but VideoEncoder (${encoderProfile.selectedCodec}) produced 0 chunks.`
+      );
+    }
+
+    if (skippedInvisiblePackets > 0) {
+      options.onLog?.(
+        `dav1d Wasm skipped ${skippedInvisiblePackets} non-display AV1 OBU packet(s) and encoded ${encodedFramesCount.toLocaleString()} visible frames.`
+      );
+    }
+
+    muxer.finalize();
+    let finalBlob = pagedWriter.toBlob('video/mp4');
+    if (options.fastStart) {
+      try {
+        const fastResult = await relocateMoovToFrontZeroCopy(finalBlob);
+        finalBlob = fastResult.blob;
+      } catch {
+        // Keep non-faststart MP4 if relocation was unnecessary
+      }
+    }
+
+    return {
+      blob: finalBlob,
+      codecUsed: encoderProfile.selectedCodec,
+      isHevc: encoderProfile.isHevc,
+      isAv1: encoderProfile.isAv1,
+      isHardware: encoderProfile.isHardware,
+      width,
+      height,
+      bitrateBps: bitrate,
+      decodeMode: 'dav1d-wasm',
+    };
+  } finally {
+    cleanup();
+  }
+}
+
 /**
  * Compresses/transcodes a video blob using WebCodecs VideoEncoder (AV1 av01 / HEVC / H.264).
- * Prefers zero-seek sequential MP4 demuxing + VideoDecoder (essential for fast AV1 decoding),
- * and automatically falls back to `<video>` frame capture with automatic software-encoder retry.
+ * Tier 1: Zero-seek sequential MP4 demuxing + WebCodecs VideoDecoder (hardware/software).
+ * Tier 2: Browser `<video>` element frame-capture fallback (with `preload='metadata'` up to 1.5 GB on iOS/iPadOS).
+ * Tier 3: Pure-WebAssembly `dav1d.js` AV1 decoder -> WebCodecs VideoEncoder when source is `av01` and browser AV1 decoding is unavailable.
  */
 export async function transcodeWithHardwareWebCodecs(
   videoBlob: Blob,
@@ -2364,35 +2906,60 @@ export async function transcodeWithHardwareWebCodecs(
 ): Promise<HardwareEncodeResult> {
   const { isIOSWebKit, isIOSChrome } = detectWebKitEnvironment();
 
-  // 1. Try zero-seek sequential VideoDecoder pipeline first (with live 1-frame encoder smoke test)
-  const sequentialResult = await transcodeViaWebCodecsVideoDecoder(videoBlob, options);
-  if (sequentialResult) {
-    return sequentialResult;
+  // Tier 1: Zero-seek sequential VideoDecoder pipeline
+  const tier1 = await transcodeViaWebCodecsVideoDecoder(videoBlob, options);
+  if (tier1.result) {
+    return tier1.result;
   }
 
-  // 2. Jetsam safeguard on iOS/iPadOS WKWebView: never map >150 MB blob:// URLs into <video>
-  // (avoids 16-second timeouts and iPadOS tab reloads)
-  if (isIOSWebKit && videoBlob.size > 150 * 1024 * 1024) {
-    throw new Error(
-      `${
-        isIOSChrome ? 'Chrome on iPadOS (WKWebView)' : 'iPadOS Safari'
-      } could not decode this ${(videoBlob.size / 1048576).toFixed(0)} MB file via direct WebCodecs VideoDecoder (skipping <video> fallback to prevent iPad memory crash).`
+  const maxIosVideoElementBytes = 1536 * 1024 * 1024; // 1.5 GB with preload='metadata'
+  const canUseVideoElementFallback = !(isIOSWebKit && videoBlob.size > maxIosVideoElementBytes);
+  let tier2Error: Error | null = null;
+
+  // Tier 2: HTMLVideoElement frame-capture fallback (if within safe iOS/iPadOS ceiling)
+  if (canUseVideoElementFallback) {
+    try {
+      return await transcodeViaVideoElementCapture(videoBlob, options);
+    } catch (err: any) {
+      if (options.signal?.aborted || err instanceof WebCodecsEncoderUnavailableError) {
+        throw err;
+      }
+      if (options.preferHardware !== false && !isIOSWebKit) {
+        try {
+          return await transcodeViaVideoElementCapture(videoBlob, {
+            ...options,
+            preferHardware: false,
+          });
+        } catch (retryErr: any) {
+          if (options.signal?.aborted || retryErr instanceof WebCodecsEncoderUnavailableError) {
+            throw retryErr;
+          }
+          tier2Error = retryErr instanceof Error ? retryErr : new Error(String(retryErr));
+        }
+      } else {
+        tier2Error = err instanceof Error ? err : new Error(String(err));
+      }
+      options.onLog?.(`Media element fallback could not decode video (${tier2Error.message}).`);
+    }
+  } else {
+    options.onLog?.(
+      `Skipping <video> element fallback for ${(videoBlob.size / 1048576).toFixed(0)} MB file (>1.5 GB iPadOS ceiling).`
     );
   }
 
-  // 3. Fallback: HTMLVideoElement frame-capture pipeline for small or non-ISO-BMFF files
-  try {
-    return await transcodeViaVideoElementCapture(videoBlob, options);
-  } catch (err: any) {
-    if (options.signal?.aborted || err instanceof WebCodecsEncoderUnavailableError) {
-      throw err;
-    }
-    if (options.preferHardware !== false && !isIOSWebKit) {
-      return await transcodeViaVideoElementCapture(videoBlob, {
-        ...options,
-        preferHardware: false,
-      });
-    }
-    throw err;
+  // Tier 3: Pure-WebAssembly dav1d AV1 decoder -> WebCodecs VideoEncoder for AV1 (av01) sources
+  if (tier1.track?.fourcc === 'av01') {
+    options.onLog?.(
+      'Browser AV1 decoder unavailable in this WKWebView/WebCodecs environment; switching to built-in dav1d WebAssembly AV1 decoder...'
+    );
+    return await transcodeViaDav1dWasm(videoBlob, tier1.track, options);
   }
+
+  const reasons = [tier1.reason, tier2Error?.message].filter(Boolean).join(' | ');
+  const envLabel = isIOSChrome ? 'Chrome on iPadOS (WKWebView)' : isIOSWebKit ? 'iPadOS Safari' : 'Browser WebCodecs';
+  throw new Error(
+    reasons
+      ? `${envLabel} could not decode this ${(videoBlob.size / 1048576).toFixed(0)} MB file (${reasons}).`
+      : `${envLabel} could not decode this ${(videoBlob.size / 1048576).toFixed(0)} MB file.`
+  );
 }

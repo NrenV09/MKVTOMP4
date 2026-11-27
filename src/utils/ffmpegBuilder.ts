@@ -336,7 +336,7 @@ export function detectDeviceCapabilities(): DeviceCapabilities {
 
   if (isIPad) {
     socVendor = 'apple';
-    chipLabel = cores >= 8 ? 'Apple M3 / M-Series (iPad Air)' : 'Apple Silicon (iPad)';
+    chipLabel = cores >= 8 ? 'Apple Silicon M-Series (iPad)' : 'Apple Silicon (iPad)';
   } else if (isApple) {
     socVendor = 'apple';
     chipLabel = cores >= 8 ? 'Apple M-Series Silicon' : 'Apple Silicon';
@@ -930,11 +930,11 @@ export function diagnoseFFmpegFailure(
     return {
       title: 'iPadOS Browser Restricted Hardware Video Codec',
       explanation:
-        typeof exitCodeOrError === 'string' && exitCodeOrError.length < 260
+        typeof exitCodeOrError === 'string' && exitCodeOrError.length < 300
           ? exitCodeOrError
-          : 'Chrome on iPadOS runs inside Apple WKWebView, which restricted hardware WebCodecs decoding/encoding for this stream.',
+          : 'Chrome on iPadOS runs inside Apple WKWebView, which restricted hardware WebCodecs decoding or encoding for this stream.',
       suggestion:
-        'Try opening this app in Apple Safari on iPadOS (which has full VideoToolbox GPU access), or switch to H.264 / Remux (Stream Copy) and tap "Copy Diagnostic Log" if it persists.',
+        'Try opening this app in Apple Safari on iPadOS (which has full VideoToolbox GPU access), switch output to H.264 / Remux (Stream Copy), or tap "Copy Diagnostic Log" to inspect exact decoder details.',
     };
   }
 

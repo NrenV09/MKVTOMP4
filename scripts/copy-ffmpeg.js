@@ -40,6 +40,11 @@ const targets = [
     dest: path.join(root, 'public', 'rars_wasm_bg.wasm'),
     isFile: true,
   },
+  {
+    src: path.join(root, 'node_modules', 'dav1d.js', 'dav1d.wasm'),
+    dest: path.join(root, 'public', 'dav1d', 'dav1d.wasm'),
+    isFile: true,
+  },
 ];
 
 for (const { src, dest, isFile } of targets) {

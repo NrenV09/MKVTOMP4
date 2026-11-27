@@ -630,12 +630,17 @@ export async function demuxMp4VideoTrack(
       }
     }
 
+    let bestFallbackTrack: DemuxedVideoTrack | null = null;
+    const skipReasons: string[] = [];
+
     for (const trak of moovChildren) {
       if (trak.type !== 'trak') continue;
       const trakChildren = iterChildBoxes(view, trak.start + trak.headerSize, trak.start + trak.size);
 
-      // Extract trackId from tkhd for fragmented MP4 matching
+      // Extract trackId & optional tkhd dimensions for fragmented/non-standard MP4 fallback
       let videoTrackId = 1;
+      let tkhdWidth = 0;
+      let tkhdHeight = 0;
       const tkhd = trakChildren.find((b) => b.type === 'tkhd');
       if (tkhd && tkhd.size >= tkhd.headerSize + 24) {
         const tkhdBody = tkhd.start + tkhd.headerSize;
@@ -644,6 +649,13 @@ export async function demuxMp4VideoTrack(
           tkhdVer === 1
             ? view.getUint32(tkhdBody + 20, false)
             : view.getUint32(tkhdBody + 12, false);
+        if (tkhdVer === 1 && tkhd.size >= tkhd.headerSize + 96) {
+          tkhdWidth = view.getUint32(tkhdBody + 88, false) >>> 16;
+          tkhdHeight = view.getUint32(tkhdBody + 92, false) >>> 16;
+        } else if (tkhdVer === 0 && tkhd.size >= tkhd.headerSize + 84) {
+          tkhdWidth = view.getUint32(tkhdBody + 76, false) >>> 16;
+          tkhdHeight = view.getUint32(tkhdBody + 80, false) >>> 16;
+        }
       }
 
       const mdia = trakChildren.find((b) => b.type === 'mdia');
@@ -692,8 +704,8 @@ export async function demuxMp4VideoTrack(
       const sampleEntryEnd = Math.min(stsd.start + stsd.size, sampleEntryStart + sampleEntrySize);
       if (sampleEntryEnd - sampleEntryStart < 86) continue;
 
-      const codedWidth = view.getUint16(sampleEntryStart + 32, false);
-      const codedHeight = view.getUint16(sampleEntryStart + 34, false);
+      const codedWidth = view.getUint16(sampleEntryStart + 32, false) || tkhdWidth;
+      const codedHeight = view.getUint16(sampleEntryStart + 34, false) || tkhdHeight;
 
       // VisualSampleEntry fixed fields are 86 bytes from box start (8 header + 78 fields)
       const configBoxes = iterChildBoxes(view, sampleEntryStart + 86, sampleEntryEnd);
@@ -710,13 +722,19 @@ export async function demuxMp4VideoTrack(
         description = payload.byteLength >= 4 ? payload : undefined;
       } else if (fourcc === 'avc1' || fourcc === 'avc3') {
         const avcC = configBoxes.find((b) => b.type === 'avcC');
-        if (!avcC) continue;
+        if (!avcC) {
+          skipReasons.push(`track ${videoTrackId} (${fourcc}) missing avcC`);
+          continue;
+        }
         const payload = moovBytes.slice(avcC.start + avcC.headerSize, avcC.start + avcC.size);
         codec = buildAvcCodecString(fourcc, payload);
         description = payload;
       } else if (fourcc === 'hvc1' || fourcc === 'hev1') {
         const hvcC = configBoxes.find((b) => b.type === 'hvcC');
-        if (!hvcC) continue;
+        if (!hvcC) {
+          skipReasons.push(`track ${videoTrackId} (${fourcc}) missing hvcC`);
+          continue;
+        }
         const payload = moovBytes.slice(hvcC.start + hvcC.headerSize, hvcC.start + hvcC.size);
         codec = buildHevcCodecString(fourcc, payload);
         description = payload;
@@ -728,6 +746,7 @@ export async function demuxMp4VideoTrack(
         codec = buildVp9CodecString(payload);
         description = undefined;
       } else {
+        skipReasons.push(`track ${videoTrackId} uses non-WebCodecs fourcc '${fourcc}'`);
         continue;
       }
 
@@ -748,7 +767,10 @@ export async function demuxMp4VideoTrack(
           signal: opts.signal,
           onProgress: opts.onScanProgress,
         });
-        if (!frag || frag.sampleCount === 0) continue;
+        if (!frag || frag.sampleCount === 0) {
+          skipReasons.push(`fragmented track ${videoTrackId} (${fourcc}) had 0 moof samples`);
+          continue;
+        }
         const elapsedMs = Math.round(
           (typeof performance !== 'undefined' ? performance.now() : Date.now()) - tStart
         );
@@ -759,7 +781,7 @@ export async function demuxMp4VideoTrack(
           frag.durationSeconds > 0
             ? Math.max(1, Math.round((frag.sampleCount / frag.durationSeconds) * 100) / 100)
             : 30;
-        return {
+        const fragTrack: DemuxedVideoTrack = {
           codec,
           fourcc,
           codedWidth,
@@ -775,9 +797,15 @@ export async function demuxMp4VideoTrack(
           sampleDurationsUs: frag.sampleDurationsUs,
           sampleIsKey: frag.sampleIsKey,
         };
+        if (frag.sampleCount > 1) return fragTrack;
+        if (!bestFallbackTrack) bestFallbackTrack = fragTrack;
+        continue;
       }
 
-      if (!stsz || sampleCount === 0 || sampleCount > 10_000_000) continue;
+      if (!stsz || sampleCount === 0 || sampleCount > 10_000_000) {
+        skipReasons.push(`track ${videoTrackId} (${fourcc}) invalid stsz sampleCount=${sampleCount}`);
+        continue;
+      }
 
       const sampleSizes = new Uint32Array(sampleCount);
       if (fixedSampleSize > 0) {
@@ -965,7 +993,7 @@ export async function demuxMp4VideoTrack(
         `Parsed MP4 sample table (${sampleCount.toLocaleString()} frames, moov ${(moovBox.size / 1048576).toFixed(1)} MB) in ${elapsedMs} ms.`
       );
 
-      return {
+      const parsedTrack: DemuxedVideoTrack = {
         codec,
         fourcc,
         codedWidth,
@@ -981,13 +1009,28 @@ export async function demuxMp4VideoTrack(
         sampleDurationsUs,
         sampleIsKey,
       };
+      if (sampleCount > 1) {
+        return parsedTrack;
+      }
+      if (!bestFallbackTrack) {
+        bestFallbackTrack = parsedTrack;
+      }
     }
 
+    if (bestFallbackTrack) {
+      return bestFallbackTrack;
+    }
+    if (skipReasons.length > 0) {
+      opts.onLog?.(`MP4 demuxer skipped video track(s): ${skipReasons.join('; ')}`);
+    } else {
+      opts.onLog?.('MP4 demuxer found no compatible video track inside moov.');
+    }
     return null;
   } catch (err: any) {
     if (opts.signal?.aborted) {
       throw err;
     }
+    opts.onLog?.(`MP4 demuxer error: ${err?.message || String(err)}`);
     return null;
   }
 }

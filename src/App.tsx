@@ -1486,7 +1486,13 @@ export default function App() {
             'system',
             `WebCodecs conversion finished (${hwResult.codecUsed}, ${hwResult.width}x${hwResult.height}, ${(
               hwResult.bitrateBps / 1_000_000
-            ).toFixed(2)} Mbps, ${hwResult.decodeMode === 'webcodecs-sequential' ? 'Zero-Seek VideoDecoder' : 'Media Element'}).`
+            ).toFixed(2)} Mbps, ${
+              hwResult.decodeMode === 'webcodecs-sequential'
+                ? 'Zero-Seek VideoDecoder'
+                : hwResult.decodeMode === 'dav1d-wasm'
+                ? 'dav1d Wasm AV1 Decoder'
+                : 'Media Element'
+            }).`
           );
         } catch (hwErr: any) {
           if (hwAbortController.current?.signal.aborted || isTargetAv1 || isSourceAv1) {
