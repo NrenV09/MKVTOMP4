@@ -720,6 +720,33 @@ async function selectVideoEncoderProfile(
     ];
   };
 
+  const withTimeout = <T,>(p: Promise<T>, ms: number, fallback: T): Promise<T> =>
+    new Promise<T>((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          resolve(fallback);
+        }
+      }, ms);
+      p.then(
+        (v) => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            resolve(v);
+          }
+        },
+        () => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            resolve(fallback);
+          }
+        }
+      );
+    });
+
   const probeCandidates = async (
     candidates: string[],
     accel: HardwareAcceleration
@@ -729,22 +756,30 @@ async function selectVideoEncoderProfile(
     }
     for (const candidate of candidates) {
       const variants = buildExtrasForCodec(candidate);
-      for (const extras of variants) {
-        try {
-          const support = await VideoEncoder.isConfigSupported({
-            codec: candidate,
-            width,
-            height,
-            bitrate,
-            framerate,
-            hardwareAcceleration: accel,
-            ...(extras as any),
-          });
-          if (support.supported) {
-            return { codec: candidate, extras };
+      const results = await Promise.all(
+        variants.map(async (extras) => {
+          try {
+            const support = await withTimeout(
+              VideoEncoder.isConfigSupported({
+                codec: candidate,
+                width,
+                height,
+                bitrate,
+                framerate,
+                hardwareAcceleration: accel,
+                ...(extras as any),
+              }),
+              2500,
+              { supported: false } as VideoEncoderSupport
+            );
+            return support.supported ? { codec: candidate, extras } : null;
+          } catch {
+            return null;
           }
-        } catch {}
-      }
+        })
+      );
+      const firstHit = results.find((r) => r !== null);
+      if (firstHit) return firstHit;
     }
     return null;
   };
@@ -1448,7 +1483,14 @@ async function transcodeViaWebCodecsVideoDecoder(
 
   options.onStatus?.('Scanning MP4 sample table...');
   options.onLog?.('Scanning MP4 track sample table via zero-copy demuxer...');
-  const track = await demuxMp4VideoTrack(videoBlob, options.onLog);
+  const track = await demuxMp4VideoTrack(videoBlob, {
+    signal: options.signal,
+    onLog: options.onLog,
+    onScanProgress: (scannedBytes, totalBytes) => {
+      const pct = totalBytes > 0 ? Math.min(99, Math.round((scannedBytes / totalBytes) * 100)) : 0;
+      options.onStatus?.(`Scanning MP4 fragments (${pct}%)...`);
+    },
+  });
   if (!track || track.sampleCount === 0 || !track.codedWidth || !track.codedHeight) {
     options.onLog?.('MP4 sample table unavailable for direct WebCodecs decode; falling back to media capture.');
     return null;
@@ -1458,18 +1500,44 @@ async function transcodeViaWebCodecsVideoDecoder(
     `Demuxed ${track.sampleCount.toLocaleString()} video frames (${track.codec}, ${track.codedWidth}x${track.codedHeight}, ${track.fps} fps, ${Math.round(track.durationSeconds)}s).`
   );
 
+  options.onStatus?.(`Probing VideoDecoder (${track.fourcc})...`);
   const wantHw = options.preferHardware !== false;
   const rawCandidates = buildDecoderCandidateConfigs(track, wantHw);
 
   const supportedDecoderConfigs: VideoDecoderConfig[] = [];
   if (typeof VideoDecoder.isConfigSupported === 'function') {
-    for (const cfg of rawCandidates) {
-      try {
-        const res = await VideoDecoder.isConfigSupported(cfg);
-        if (res.supported) {
-          supportedDecoderConfigs.push(cfg);
-        }
-      } catch {}
+    const probeResults = await Promise.all(
+      rawCandidates.map(
+        (cfg) =>
+          new Promise<VideoDecoderConfig | null>((resolve) => {
+            let settled = false;
+            const timer = setTimeout(() => {
+              if (!settled) {
+                settled = true;
+                resolve(null);
+              }
+            }, 2500);
+            VideoDecoder.isConfigSupported(cfg).then(
+              (res) => {
+                if (!settled) {
+                  settled = true;
+                  clearTimeout(timer);
+                  resolve(res.supported ? cfg : null);
+                }
+              },
+              () => {
+                if (!settled) {
+                  settled = true;
+                  clearTimeout(timer);
+                  resolve(null);
+                }
+              }
+            );
+          })
+      )
+    );
+    for (const cfg of probeResults) {
+      if (cfg) supportedDecoderConfigs.push(cfg);
     }
   } else {
     supportedDecoderConfigs.push(...rawCandidates);
